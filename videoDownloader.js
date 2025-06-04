@@ -148,13 +148,7 @@ async function handleDownload(req, res, downloadProgressMap) {
                     '--cookies-from-browser', 'brave',
                     '--cookies-from-browser', 'chromium',
                     '--cookies-from-browser', 'vivaldi',
-                    '--cookies-from-browser', 'librewolf',
-                    '--cookies-from-browser', 'waterfox',
-                    '--cookies-from-browser', 'palemoon',
-                    '--cookies-from-browser', 'firefox-developer-edition',
-                    '--cookies-from-browser', 'firefox-nightly',
-                    '--cookies-from-browser', 'firefox-beta',
-                    '--cookies-from-browser', 'firefox-esr',
+                    '--cookies-from-browser', 'whale'
                 ];
                 if (type === 'audio') {
                     ytDlpOptions.push('--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0');
