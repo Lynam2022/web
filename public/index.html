@@ -3,41 +3,43 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SnapTubeX | Tải Video Không Logo</title>
+    <title>Y2TubeX | Tải Video Không Logo</title>
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <script src="translations.js"></script>
 </head>
 <body>
     <header class="header">
-        <a href="/" class="logo">SnapTubeX</a>
-        <div class="nav-links">
-            <a href="privacy-policy.html" id="privacyPolicyLink" target="_blank">Privacy Policy</a>
-            <a href="terms-of-service.html" id="termsOfServiceLink" target="_blank">Terms of Service</a>
-        </div>
+        <a href="/" class="logo">Y2TubeX</a>
     </header>
     <div class="container">
-        <h1 class="title">Tải Video Youtube</h1>
-        <p class="subtitle">Dán link từ TikTok, Instagram, YouTube, Twitter/X, Facebook, Douyin để tải video!</p>
+        <h1 class="title"><i class="fab fa-youtube"></i> <span data-i18n="title">Tải Video YouTube</span></h1>
+        <p class="subtitle"><i class="fas fa-link"></i> <span data-i18n="subtitle">Dán link từ YouTube để tải video!</span></p>
         <div class="input-group">
-            <input type="text" id="videoUrl" placeholder="Dán link nội dung (ví dụ: https://youtu.be/...)">
-            <span id="platformIcon" class="platform-icon"></span>
-            <button id="fetchBtn" class="fetch-btn">Tải Ngay</button>
+            <div class="input-wrapper">
+                <i id="validationIcon" class="fas fa-check-circle validation-icon"></i>
+                <input type="text" id="videoUrl" data-i18n-placeholder="pastePlaceholder" placeholder="Dán link nội dung (ví dụ: https://www.youtube.com/watch?v=DZIASl9q90s)">
+                <button id="pasteBtn" class="paste-btn" title="Dán link"><i class="fas fa-paste"></i></button>
+                <button id="clearBtn" class="clear-btn" title="Xóa link" style="display: none;"><i class="fas fa-times"></i></button>
+            </div>
+            <button id="fetchBtn" class="fetch-btn" data-i18n="downloadNow">Tải Ngay</button>
         </div>
         <div class="content-preview" id="contentPreview" style="display: none;">
             <div class="video-info">
-                <img id="thumbnail" src="" alt="Thumbnail" onerror="this.src='https://via.placeholder.com/300x150?text=Thumbnail+Not+Available';">
+                <img id="thumbnail" src="assets/images/placeholder.png" alt="Thumbnail" 
+                     onerror="this.onerror=null; this.src='data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMzAwIiBoZWlnaHQ9IjE1MCIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj48cmVjdCB3aWR0aD0iMzAwIiBoZWlnaHQ9IjE1MCIgZmlsbD0iI2YwZjBmMCIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBmb250LWZhbWlseT0iQXJpYWwsIHNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTYiIGZpbGw9IiM2NjYiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGR5PSIuM2VtIj5UaHVtYm5haWwgTm90IEF2YWlsYWJsZTwvdGVhHQ+PC9zdmc+';">
                 <div class="title-group">
                     <h3 id="title" class="title-box">Tiêu đề video</h3>
-                    <button id="copyTitleBtn" class="copy-btn" title="Sao chép tiêu đề"><i class="fas fa-copy"></i></button>
+                    <button id="copyTitleBtn" class="copy-btn" data-i18n-title="copyTitle" title="Sao chép tiêu đề"><i class="fas fa-copy"></i></button>
                 </div>
             </div>
             <div class="download-options">
                 <div class="subtitle-section">
-                    <h3>Tải Phụ Đề</h3>
+                    <h3 data-i18n="downloadSubtitle">Tải Phụ Đề</h3>
                     <div class="select-wrapper">
                         <select id="subtitleLanguage">
-                            <option value="">Chọn ngôn ngữ phụ đề</option>
+                            <option value="" data-i18n="selectLanguage">Chọn ngôn ngữ phụ đề</option>
                             <option value="af">Tiếng Afrikaans</option>
                             <option value="sq">Tiếng Albania</option>
                             <option value="am">Tiếng Amharic</option>
@@ -149,32 +151,100 @@
                             <option value="vtt">VTT</option>
                         </select>
                     </div>
-                    <button id="downloadSubtitleBtn" class="download-btn subtitle"><i class="fas fa-closed-captioning"></i> Tải Phụ Đề <span class="spinner"></span></button>
+                    <button id="downloadSubtitleBtn" class="download-btn subtitle"><i class="fas fa-closed-captioning"></i> <span data-i18n="downloadSubtitle">Tải Phụ Đề</span> <span class="spinner"></span></button>
                 </div>
                 <div class="download-content">
-                    <h3>Chất lượng</h3>
+                    <h3 data-i18n="quality">Chất lượng</h3>
                     <div class="quality-options">
-                        <label><input type="radio" name="quality" value="high" checked> Cao (Full HD)</label>
-                        <label><input type="radio" name="quality" value="medium"> Trung (HD)</label>
-                        <label><input type="radio" name="quality" value="low"> Thấp (SD)</label>
+                        <label><input type="radio" name="quality" value="high" checked> <span data-i18n="highQuality">Cao (Full HD)</span></label>
+                        <label><input type="radio" name="quality" value="medium"> <span data-i18n="mediumQuality">Trung (HD)</span></label>
+                        <label><input type="radio" name="quality" value="low"> <span data-i18n="lowQuality">Thấp (SD)</span></label>
                     </div>
                     <div class="download-buttons">
-                        <button id="downloadVideoBtn" class="download-btn"><i class="fas fa-video"></i> Tải Video <span class="spinner"></span></button>
-                        <button id="downloadAudioBtn" class="download-btn audio"><i class="fas fa-music"></i> Tải Âm Thanh <span class="spinner"></span></button>
+                        <button id="downloadVideoBtn" class="download-btn"><i class="fas fa-video"></i> <span data-i18n="downloadVideo">Tải Video</span> <span class="spinner"></span></button>
+                        <button id="downloadAudioBtn" class="download-btn audio"><i class="fas fa-music"></i> <span data-i18n="downloadAudio">Tải Âm Thanh</span> <span class="spinner"></span></button>
                     </div>
                 </div>
             </div>
         </div>
         <div class="thumbnail-resolutions" id="thumbnailResolutions" style="display: none;">
-            <h4>Các độ phân giải Thumbnail</h4>
+            <h4>Thumbnail Resolutions</h4>
             <div class="thumbnail-list"></div>
-            <button id="downloadThumbnailBtn" class="download-btn thumbnail"><i class="fas fa-image"></i> Tải Thumbnail <span class="spinner"></span></button>
+            <button id="downloadThumbnailBtn" class="download-btn thumbnail"><i class="fas fa-image"></i> <span data-i18n="downloadThumbnail">Tải Thumbnail</span> <span class="spinner"></span></button>
         </div>
         <div id="result" class="result"></div>
     </div>
-    <footer class="footer">
-        2025 © SnapTubeX
+
+    <!-- Thông tin cập nhật web -->
+    <div class="update-info">
+        <h2><i class="fas fa-info-circle"></i> <span data-i18n="updateInfo">Thông Tin Cập Nhật</span></h2>
+        <div class="update-content">
+            <div class="update-item">
+                <span class="update-date">30/05/2025</span>
+                <h3>Phiên bản Beta 1.0.0</h3>
+                <ul>
+                    <li data-i18n="updateFeature1">Thêm tính năng tải phụ đề với nhiều ngôn ngữ</li>
+                    <li data-i18n="updateFeature2">Cải thiện chất lượng video tải về</li>
+                    <li data-i18n="updateFeature3">Tối ưu hóa tốc độ tải xuống</li>
+                    <li data-i18n="updateFeature4">Sửa lỗi và cải thiện giao diện</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- Hướng dẫn sử dụng -->
+    <div class="usage-guide">
+        <h2><i class="fas fa-book"></i> <span data-i18n="usageGuide">Hướng Dẫn Sử Dụng</span></h2>
+        <div class="guide-content">
+            <div class="guide-section">
+                <h3><i class="fas fa-play-circle"></i> <span data-i18n="downloadVideoGuide">Tải Video</span></h3>
+                <ol>
+                    <li data-i18n="downloadVideoStep1">Dán link video YouTube vào ô nhập liệu</li>
+                    <li data-i18n="downloadVideoStep2">Nhấn nút "Tải Ngay" để xem thông tin video</li>
+                    <li data-i18n="downloadVideoStep3">Chọn chất lượng video mong muốn</li>
+                    <li data-i18n="downloadVideoStep4">Nhấn nút "Tải Video" để bắt đầu tải xuống</li>
+                </ol>
+            </div>
+            <div class="guide-section">
+                <h3><i class="fas fa-music"></i> <span data-i18n="downloadAudioGuide">Tải Âm Thanh</span></h3>
+                <ol>
+                    <li data-i18n="downloadAudioStep1">Dán link video YouTube vào ô nhập liệu</li>
+                    <li data-i18n="downloadAudioStep2">Nhấn nút "Tải Ngay" để xem thông tin video</li>
+                    <li data-i18n="downloadAudioStep3">Nhấn nút "Tải Âm Thanh" để tải file MP3</li>
+                </ol>
+            </div>
+            <div class="guide-section">
+                <h3><i class="fas fa-closed-captioning"></i> <span data-i18n="downloadSubtitleGuide">Tải Phụ Đề</span></h3>
+                <ol>
+                    <li data-i18n="downloadSubtitleStep1">Dán link video YouTube vào ô nhập liệu</li>
+                    <li data-i18n="downloadSubtitleStep2">Nhấn nút "Tải Ngay" để xem thông tin video</li>
+                    <li data-i18n="downloadSubtitleStep3">Chọn ngôn ngữ phụ đề từ danh sách</li>
+                    <li data-i18n="downloadSubtitleStep4">Chọn định dạng phụ đề (SRT, TXT, VTT)</li>
+                    <li data-i18n="downloadSubtitleStep5">Nhấn nút "Tải Phụ Đề" để tải xuống</li>
+                </ol>
+            </div>
+            <div class="guide-section">
+                <h3><i class="fas fa-image"></i> <span data-i18n="downloadThumbnailGuide">Tải Thumbnail</span></h3>
+                <ol>
+                    <li data-i18n="downloadThumbnailStep1">Dán link video YouTube vào ô nhập liệu</li>
+                    <li data-i18n="downloadThumbnailStep2">Nhấn nút "Tải Ngay" để xem thông tin video</li>
+                    <li data-i18n="downloadThumbnailStep3">Chọn độ phân giải thumbnail mong muốn</li>
+                    <li data-i18n="downloadThumbnailStep4">Nhấn nút "Tải Thumbnail" để tải xuống</li>
+                </ol>
+            </div>
+        </div>
+    </div>
+
+    <footer class="footer">       
+        <div class="footer-content">
+            <div class="copyright">2025 © Y2TubeX Beta <span id="platformIcon"></span></div>
+            <div class="footer-links">
+                <a href="privacy-policy.html" id="privacyPolicyLink" target="_blank">Privacy Policy</a>
+                <span class="separator">|</span>
+                <a href="terms-of-service.html" id="termsOfServiceLink" target="_blank">Terms of Service</a>
+            </div>
+        </div>
     </footer>
-    <script defer src="script.js"></script>
+    <script type="module" src="script.js"></script>
 </body>
 </html>

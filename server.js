@@ -14,21 +14,23 @@ const { getSubtitles: getYTSubtitles } = require('@treeee/youtube-caption-extrac
 const ytDlp = require('yt-dlp-exec');
 const ffmpeg = require('fluent-ffmpeg');
 const { JSDOM } = require('jsdom');
+const { handleDownload } = require('./videoDownloader');
+const { handleDownloadSubtitle } = require('./subtitleDownloader');
+const { 
+    logger,
+    fetchWithRetry,
+    checkFFmpeg,
+    validateFile,
+    cleanFolder,
+    sanitizeFileName,
+    checkVideoAvailability,
+    getVideoTitle,
+    convertVttToSrt,
+    convertXmlToVtt,
+    truncateSubtitleText
+} = require('./utils');
 
 // Khởi tạo logger với winston
-const logger = winston.createLogger({
-    level: 'info',
-    format: winston.format.combine(
-        winston.format.timestamp(),
-        winston.format.json()
-    ),
-    transports: [
-        new winston.transports.File({ filename: 'error.log', level: 'error' }),
-        new winston.transports.File({ filename: 'combined.log' }),
-        new winston.transports.Console()
-    ]
-});
-
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -45,6 +47,13 @@ app.use(express.json({
     }
 }));
 app.use(express.static('public'));
+app.use('/downloads', express.static(path.join(__dirname, 'downloads'), {
+    maxAge: '1h',
+    setHeaders: (res, path) => {
+        res.set('Content-Disposition', 'attachment');
+        res.set('Transfer-Encoding', 'chunked');
+    }
+}));
 
 // Middleware xử lý CORS (giới hạn origin)
 const allowedOrigins = ['http://localhost:3000', 'https://yourdomain.com'];
@@ -92,42 +101,12 @@ const subtitleRateLimiter = new RateLimiterMemory({
     duration: 1,
 });
 
-// Hàm gọi API với retry mechanism (tăng retries và timeout)
-async function fetchWithRetry(url, options, retries = 5, delay = 2000) {
-    for (let i = 0; i <= retries; i++) {
-        try {
-            const response = await axios(url, { ...options, timeout: 60000 }); // Tăng timeout lên 60s
-            return response;
-        } catch (error) {
-            logger.warn(`Retry ${i + 1}/${retries + 1} failed for ${url}: ${error.message}`);
-            if (i === retries) throw error;
-            await new Promise(resolve => setTimeout(resolve, delay));
-        }
-    }
-}
-
-// Hàm kiểm tra tính khả dụng của FFmpeg và codec
-async function checkFFmpeg() {
-    return new Promise((resolve) => {
-        require('child_process').exec('ffmpeg -version', (err) => {
-            if (err) {
-                logger.error('FFmpeg is not installed or accessible');
-                resolve(false);
-                return;
-            }
-            
-            // Kiểm tra codec MP3
-            require('child_process').exec('ffmpeg -codecs | findstr mp3', (codecErr) => {
-                if (codecErr) {
-                    logger.error('MP3 codec is not available in FFmpeg');
-                    resolve(false);
-                    return;
-                }
-                resolve(true);
-            });
-        });
-    });
-}
+// Tăng timeout cho các request
+app.use((req, res, next) => {
+    req.setTimeout(600000); // 10 phút
+    res.setTimeout(600000);
+    next();
+});
 
 // Hàm kiểm tra tính khả dụng của phụ đề
 async function checkSubtitleAvailability(url, language) {
@@ -326,6 +305,52 @@ async function downloadSubtitleWithYtdlCore(url, language, isAuto = false) {
 // Hàm tải video/âm thanh với @distube/ytdl-core
 async function downloadMediaWithYtdlCore(url, type, quality) {
     try {
+        // Nếu là audio, sử dụng yt-dlp trực tiếp
+        if (type === 'audio') {
+            logger.info('Using yt-dlp for audio download...');
+            const tempDir = path.join(__dirname, 'temp');
+            if (!await fsPromises.access(tempDir).then(() => true).catch(() => false)) {
+                await fsPromises.mkdir(tempDir, { recursive: true });
+            }
+
+            const outputPath = path.join(tempDir, `${Date.now()}.mp3`);
+            try {
+                await ytDlp(url, {
+                    extractAudio: true,
+                    audioFormat: 'mp3',
+                    audioQuality: 0, // Best quality
+                    output: outputPath,
+                    noCheckCertificates: true,
+                    noWarnings: true,
+                    preferFreeFormats: true,
+                    addHeader: [
+                        'referer:youtube.com',
+                        'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                    ]
+                });
+
+                const fileStream = fs.createReadStream(outputPath);
+                fileStream.on('end', () => {
+                    fs.unlink(outputPath, () => {});
+                });
+
+                return { 
+                    format: { 
+                        container: 'mp3',
+                        mimeType: 'audio/mp3',
+                        hasAudio: true,
+                        hasVideo: false,
+                        quality: 'high'
+                    }, 
+                    stream: fileStream 
+                };
+            } catch (ytdlpError) {
+                logger.error(`yt-dlp download failed: ${ytdlpError.message}`);
+                throw ytdlpError;
+            }
+        }
+
+        // Nếu là video, tiếp tục sử dụng ytdl-core
         // List of user agents to try
         const userAgents = [
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -338,31 +363,43 @@ async function downloadMediaWithYtdlCore(url, type, quality) {
         let lastError = null;
         let selectedFormat = null;
         let info = null;
+        let retryCount = 0;
+        const maxRetries = 3;
 
-        // Try each user agent
-        for (const userAgent of userAgents) {
-            try {
-                info = await ytdl.getInfo(url, {
-                    requestOptions: {
-                        headers: {
-                            'User-Agent': userAgent,
-                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                            'Accept-Language': 'en-US,en;q=0.5',
-                            'Connection': 'keep-alive',
-                            'Upgrade-Insecure-Requests': '1'
-                        }
-                    }
-                });
-                break; // If successful, break the loop
-            } catch (error) {
-                lastError = error;
-                logger.warn(`Failed to get video info with user agent ${userAgent}: ${error.message}`);
-                await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second before retrying
+        // Try each user agent with retries
+        while (retryCount < maxRetries) {
+            for (const userAgent of userAgents) {
+                try {
+                    info = await ytdl.getInfo(url, {
+                        requestOptions: {
+                            headers: {
+                                'User-Agent': userAgent,
+                                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                                'Accept-Language': 'en-US,en;q=0.5',
+                                'Connection': 'keep-alive',
+                                'Upgrade-Insecure-Requests': '1'
+                            }
+                        },
+                        timeout: 30000
+                    });
+                    break; // If successful, break the loop
+                } catch (error) {
+                    lastError = error;
+                    logger.warn(`Failed to get video info with user agent ${userAgent}: ${error.message}`);
+                    await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second before retrying
+                }
+            }
+
+            if (info) break; // If we got info, break the retry loop
+            retryCount++;
+            if (retryCount < maxRetries) {
+                logger.info(`Retrying video info fetch (attempt ${retryCount + 1}/${maxRetries})`);
+                await new Promise(resolve => setTimeout(resolve, 2000 * retryCount)); // Exponential backoff
             }
         }
 
         if (!info) {
-            throw new Error(`Failed to get video info after trying all user agents: ${lastError?.message}`);
+            throw new Error(`Failed to get video info after ${maxRetries} retries: ${lastError?.message}`);
         }
 
         const formats = info.formats;
@@ -379,63 +416,43 @@ async function downloadMediaWithYtdlCore(url, type, quality) {
             }))
         });
 
-        // Lọc định dạng phù hợp
-        if (type === 'video') {
-            // Định nghĩa các mức chất lượng
-            const qualityMap = {
-                high: ['1080p', '720p', '480p'],
-                medium: ['720p', '480p', '360p'],
-                low: ['480p', '360p', '240p']
-            };
-            const preferredQualities = qualityMap[quality] || qualityMap['high'];
+        // Định nghĩa các mức chất lượng
+        const qualityMap = {
+            high: ['1080p', '720p', '480p'],
+            medium: ['720p', '480p', '360p'],
+            low: ['480p', '360p', '240p']
+        };
+        const preferredQualities = qualityMap[quality] || qualityMap['high'];
 
-            // Thử tìm định dạng phù hợp theo thứ tự ưu tiên
-            for (const q of preferredQualities) {
-                // Tìm định dạng có cả video và audio
-                selectedFormat = formats.find(f => {
-                    const hasVideo = f.hasVideo;
-                    const hasAudio = f.hasAudio;
-                    const qualityMatch = f.qualityLabel === q;
-                    return hasVideo && hasAudio && qualityMatch;
-                });
-
-                if (selectedFormat) break;
-
-                // Nếu không tìm thấy, thử tìm định dạng video có chất lượng phù hợp
-                selectedFormat = formats.find(f => {
-                    const hasVideo = f.hasVideo;
-                    const qualityMatch = f.qualityLabel === q;
-                    return hasVideo && qualityMatch;
-                });
-
-                if (selectedFormat) break;
-            }
-
-            // Nếu vẫn không tìm thấy, lấy định dạng video đầu tiên
-            if (!selectedFormat) {
-                selectedFormat = formats.find(f => f.hasVideo);
-            }
-        } else {
-            // Cho audio, ưu tiên định dạng có sẵn MP3
+        // Thử tìm định dạng phù hợp theo thứ tự ưu tiên
+        for (const q of preferredQualities) {
+            // Tìm định dạng có cả video và audio
             selectedFormat = formats.find(f => {
+                const hasVideo = f.hasVideo;
                 const hasAudio = f.hasAudio;
-                const noVideo = !f.hasVideo;
-                const isMP3 = f.container === 'mp3' || f.mimeType.includes('mp3');
-                return hasAudio && noVideo && isMP3;
+                const qualityMatch = f.qualityLabel === q;
+                return hasVideo && hasAudio && qualityMatch;
             });
 
-            // Nếu không tìm thấy MP3, lấy định dạng audio bất kỳ
-            if (!selectedFormat) {
-                selectedFormat = formats.find(f => {
-                    const hasAudio = f.hasAudio;
-                    const noVideo = !f.hasVideo;
-                    return hasAudio && noVideo;
-                });
-            }
+            if (selectedFormat) break;
+
+            // Nếu không tìm thấy, thử tìm định dạng video có chất lượng phù hợp
+            selectedFormat = formats.find(f => {
+                const hasVideo = f.hasVideo;
+                const qualityMatch = f.qualityLabel === q;
+                return hasVideo && qualityMatch;
+            });
+
+            if (selectedFormat) break;
+        }
+
+        // Nếu vẫn không tìm thấy, lấy định dạng video đầu tiên
+        if (!selectedFormat) {
+            selectedFormat = formats.find(f => f.hasVideo);
         }
 
         if (!selectedFormat) {
-            throw new Error(`Không tìm thấy định dạng phù hợp cho ${type}. Vui lòng thử lại với chất lượng khác.`);
+            throw new Error(`Không tìm thấy định dạng phù hợp cho video. Vui lòng thử lại với chất lượng khác.`);
         }
 
         logger.info(`Selected format:`, {
@@ -447,44 +464,78 @@ async function downloadMediaWithYtdlCore(url, type, quality) {
             mimeType: selectedFormat.mimeType
         });
 
-        // Try downloading with different user agents
+        // Try downloading with different user agents and retries
         let lastDownloadError = null;
-        for (const userAgent of userAgents) {
-            try {
-                const stream = ytdl(url, {
-                    quality: selectedFormat.itag,
-                    filter: type === 'audio' ? 'audioonly' : undefined,
-                    requestOptions: {
-                        headers: {
-                            'User-Agent': userAgent,
-                            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                            'Accept-Language': 'en-US,en;q=0.5',
-                            'Connection': 'keep-alive',
-                            'Upgrade-Insecure-Requests': '1'
-                        }
-                    }
-                });
+        retryCount = 0;
 
-                // Test the stream
-                await new Promise((resolve, reject) => {
-                    stream.on('error', reject);
-                    stream.on('data', () => {
-                        stream.removeAllListeners('error');
-                        resolve();
+        while (retryCount < maxRetries) {
+            for (const userAgent of userAgents) {
+                try {
+                    const options = {
+                        quality: selectedFormat.itag,
+                        requestOptions: {
+                            headers: {
+                                'User-Agent': userAgent,
+                                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                                'Accept-Language': 'en-US,en;q=0.5',
+                                'Connection': 'keep-alive',
+                                'Upgrade-Insecure-Requests': '1',
+                                'Origin': 'https://www.youtube.com',
+                                'Referer': 'https://www.youtube.com/'
+                            }
+                        },
+                        timeout: 60000 // Increase timeout to 60 seconds
+                    };
+
+                    const stream = ytdl(url, options);
+
+                    // Add error handler for the stream
+                    stream.on('error', (error) => {
+                        logger.error(`Stream error: ${error.message}`, {
+                            error: error.stack,
+                            url: url,
+                            type: type,
+                            format: selectedFormat
+                        });
+                        throw error;
                     });
-                });
 
-                return { format: selectedFormat, stream };
-            } catch (error) {
-                lastDownloadError = error;
-                logger.warn(`Failed to download with user agent ${userAgent}: ${error.message}`);
-                await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second before retrying
+                    // Test the stream
+                    await new Promise((resolve, reject) => {
+                        const timeout = setTimeout(() => {
+                            reject(new Error('Stream test timeout'));
+                        }, 10000);
+
+                        stream.on('error', (error) => {
+                            clearTimeout(timeout);
+                            reject(error);
+                        });
+
+                        stream.on('data', () => {
+                            clearTimeout(timeout);
+                            stream.removeAllListeners('error');
+                            resolve();
+                        });
+                    });
+
+                    return { format: selectedFormat, stream };
+                } catch (error) {
+                    lastDownloadError = error;
+                    logger.warn(`Failed to download with user agent ${userAgent}: ${error.message}`);
+                    await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second before retrying
+                }
+            }
+
+            retryCount++;
+            if (retryCount < maxRetries) {
+                logger.info(`Retrying download (attempt ${retryCount + 1}/${maxRetries})`);
+                await new Promise(resolve => setTimeout(resolve, 2000 * retryCount)); // Exponential backoff
             }
         }
 
-        throw new Error(`Failed to download after trying all user agents: ${lastDownloadError?.message}`);
+        throw new Error(`Failed to download after ${maxRetries} retries: ${lastDownloadError?.message}`);
     } catch (error) {
-        logger.error(`Error downloading media with ytdl-core: ${error.message}`, {
+        logger.error(`Error downloading media: ${error.message}`, {
             error: error.stack,
             url: url,
             type: type,
@@ -492,100 +543,6 @@ async function downloadMediaWithYtdlCore(url, type, quality) {
         });
         throw error;
     }
-}
-
-// Hàm xóa file cũ nhất nếu vượt quá giới hạn
-async function cleanFolder(folderPath, maxFiles = 10) {
-    try {
-        const exists = await fsPromises.access(folderPath).then(() => true).catch(() => false);
-        if (!exists) return;
-
-        const files = await fsPromises.readdir(folderPath);
-        const fileStats = [];
-
-        for (const file of files) {
-            const filePath = path.join(folderPath, file);
-            const stats = await fsPromises.stat(filePath);
-            if (stats.isFile()) {
-                fileStats.push({ file, mtimeMs: stats.mtimeMs });
-            }
-        }
-
-        if (fileStats.length > maxFiles) {
-            fileStats.sort((a, b) => a.mtimeMs - b.mtimeMs);
-            const fileToDelete = path.join(folderPath, fileStats[0].file);
-            logger.info(`Chuẩn bị xóa file cũ nhất: ${fileToDelete}`);
-            await fsPromises.unlink(fileToDelete);
-            logger.info(`Đã xóa file cũ nhất: ${fileToDelete}`);
-        }
-    } catch (error) {
-        logger.error(`Error cleaning folder ${folderPath}: ${error.message}`);
-    }
-}
-
-// Hàm xử lý tiêu đề thành tên file hợp lệ
-function sanitizeFileName(title) {
-    return title
-        .replace(/[<>:"\/\\|?*\x00-\x1F]/g, '_')
-        .replace(/\s+/g, '_')
-        .substring(0, 50)
-        .trim();
-}
-
-// Hàm kiểm tra tính khả dụng của video YouTube
-async function checkVideoAvailability(videoId) {
-    try {
-        const response = await fetchWithRetry(`https://www.googleapis.com/youtube/v3/videos`, {
-            params: {
-                part: 'status',
-                id: videoId,
-                key: process.env.YOUTUBE_API_KEY
-            }
-        });
-        const video = response.data.items[0];
-        if (!video) {
-            return { isAvailable: false, reason: 'Video không tồn tại hoặc đã bị xóa.' };
-        }
-        if (video.status.uploadStatus !== 'processed') {
-            return { isAvailable: false, reason: 'Video chưa được xử lý hoàn tất.' };
-        }
-        return { isAvailable: true };
-    } catch (error) {
-        logger.error(`Error checking video availability: ${error.message}`);
-        return { isAvailable: false, reason: 'Không thể kiểm tra tính khả dụng của video.' };
-    }
-}
-
-// Hàm lấy tiêu đề video từ YouTube API
-async function getVideoTitle(videoId) {
-    try {
-        const response = await fetchWithRetry(`https://www.googleapis.com/youtube/v3/videos`, {
-            params: {
-                part: 'snippet',
-                id: videoId,
-                key: process.env.YOUTUBE_API_KEY
-            }
-        });
-        const item = response.data.items[0];
-        if (item) {
-            return sanitizeFileName(item.snippet.title);
-        }
-        return `Video_YouTube_${videoId}`;
-    } catch (error) {
-        logger.error(`Error fetching video title: ${error.message}`);
-        return `Video_YouTube_${videoId}`;
-    }
-}
-
-// Hàm cắt đoạn văn bản nếu vượt quá giới hạn ký tự
-function truncateSubtitleText(text, maxLength = 40) {
-    if (!text) return '';
-    text = text.trim();
-    if (text.length <= maxLength) return text;
-
-    let lastSpaceIndex = text.lastIndexOf(' ', maxLength);
-    if (lastSpaceIndex === -1) lastSpaceIndex = maxLength;
-    return text.substring(0, lastSpaceIndex).trim();
 }
 
 // Hàm chuyển đổi phụ đề sang VTT (chỉ giữ thời gian và văn bản)
@@ -653,178 +610,6 @@ function msToTimeSrt(ms) {
 // Hàm bổ sung số 0 cho định dạng thời gian
 function pad(num, size = 2) {
     return num.toString().padStart(size, '0');
-}
-
-// Hàm chuyển đổi XML sang VTT
-function convertXmlToVtt(xmlText) {
-    try {
-        // Kiểm tra nếu là XML
-        if (!xmlText.includes('<?xml') && !xmlText.includes('<transcript>')) {
-            return xmlText; // Trả về nguyên bản nếu không phải XML
-        }
-
-        const dom = new JSDOM(xmlText, { contentType: "text/xml" });
-        const xmlDoc = dom.window.document;
-        const textElements = xmlDoc.getElementsByTagName("text");
-        
-        if (textElements.length === 0) {
-            logger.error('No text elements found in XML');
-            return null;
-        }
-
-        let vttText = "WEBVTT\n\n";
-        let hasValidContent = false;
-        
-        for (let i = 0; i < textElements.length; i++) {
-            const text = textElements[i];
-            const start = parseFloat(text.getAttribute("start"));
-            const dur = parseFloat(text.getAttribute("dur"));
-            
-            if (isNaN(start) || isNaN(dur)) {
-                logger.warn(`Invalid timestamp at index ${i}: start=${start}, dur=${dur}`);
-                continue;
-            }
-
-            const end = start + dur;
-            const startTime = msToTime(start * 1000);
-            const endTime = msToTime(end * 1000);
-            
-            // Xử lý nội dung text
-            let content = text.textContent
-                .replace(/&amp;quot;/g, '"')
-                .replace(/&amp;/g, '&')
-                .replace(/&lt;/g, '<')
-                .replace(/&gt;/g, '>')
-                .replace(/&nbsp;/g, ' ')
-                .replace(/\n/g, ' ')
-                .trim();
-
-            if (content) {
-                vttText += `${startTime} --> ${endTime}\n${content}\n\n`;
-                hasValidContent = true;
-            }
-        }
-
-        if (!hasValidContent) {
-            logger.error('No valid content found after XML conversion');
-            return null;
-        }
-
-        return vttText.trim();
-    } catch (error) {
-        logger.error(`XML to VTT conversion failed: ${error.message}`, {
-            error: error.stack,
-            xmlContent: xmlText
-        });
-        return null;
-    }
-}
-
-// Hàm trích xuất văn bản từ VTT thành TXT
-function extractTextFromVtt(vttText) {
-    if (!vttText || vttText.trim() === '') {
-        logger.error('Empty VTT content for text extraction');
-        return null;
-    }
-
-    try {
-        // Kiểm tra nếu là XML
-        if (vttText.includes('<?xml') || vttText.includes('<transcript>')) {
-            vttText = convertXmlToVtt(vttText);
-            if (!vttText) {
-                throw new Error('Failed to convert XML to VTT');
-            }
-        }
-
-        const lines = vttText.split('\n');
-        let text = '';
-        let i = 0;
-        let debugInfo = {
-            totalLines: lines.length,
-            contentLines: 0,
-            emptyLines: 0,
-            hasValidContent: false
-        };
-
-        // Bỏ qua header WEBVTT và các dòng trống đầu tiên
-        while (i < lines.length && (lines[i].startsWith('WEBVTT') || lines[i].trim() === '')) {
-            i++;
-        }
-
-        while (i < lines.length) {
-            if (lines[i].match(/\d{2}:\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}:\d{2}\.\d{3}/)) {
-                i++;
-                let subtitleText = '';
-                let hasText = false;
-
-                while (i < lines.length && lines[i].trim() !== '') {
-                    debugInfo.contentLines++;
-                    let cleanLine = lines[i]
-                        .replace(/<[^>]+>/g, '')
-                        .replace(/align:start/g, '')
-                        .replace(/position:\d+%/g, '')
-                        .replace(/\d{2}:\d{2}:\d{2}\.\d{3}/g, '')
-                        .replace(/<c>/g, '')
-                        .replace(/<\/c>/g, '')
-                        .replace(/&nbsp;/g, ' ')
-                        .replace(/&amp;/g, '&')
-                        .replace(/&lt;/g, '<')
-                        .replace(/&gt;/g, '>')
-                        .replace(/&quot;/g, '"')
-                        .replace(/&#39;/g, "'")
-                        .replace(/\u200B/g, '')
-                        .replace(/\u200C/g, '')
-                        .replace(/\u200D/g, '')
-                        .replace(/\u200E/g, '')
-                        .replace(/\u200F/g, '')
-                        .trim();
-
-                    if (cleanLine) {
-                        subtitleText += (subtitleText ? '\n' : '') + cleanLine;
-                        hasText = true;
-                    }
-                    i++;
-                }
-
-                if (hasText) {
-                    const truncatedText = truncateSubtitleText(subtitleText);
-                    text += (text ? '\n\n' : '') + truncatedText;
-                    debugInfo.hasValidContent = true;
-                }
-            } else {
-                if (lines[i].trim() === '') {
-                    debugInfo.emptyLines++;
-                }
-                i++;
-            }
-        }
-
-        if (!debugInfo.hasValidContent) {
-            logger.error('No valid text content found in VTT', {
-                debugInfo,
-                vttContent: vttText
-            });
-            return null;
-        }
-
-        const result = text.trim();
-        if (result === '') {
-            logger.error('Empty text content after extraction', {
-                debugInfo,
-                vttContent: vttText
-            });
-            return null;
-        }
-
-        logger.info(`Extracted text content from VTT`, { debugInfo });
-        return result;
-    } catch (error) {
-        logger.error(`Text extraction from VTT failed: ${error.message}`, {
-            error: error.stack,
-            vttContent: vttText
-        });
-        return null;
-    }
 }
 
 // Hàm chuyển đổi phụ đề sang định dạng khác
@@ -1078,389 +863,63 @@ app.post('/api/metadata', async (req, res) => {
     }
 });
 
-// Endpoint tải video hoặc âm thanh
-app.post('/api/download', async (req, res) => {
-    if (!req.body || Object.keys(req.body).length === 0) {
-        logger.warn(`Invalid request body from IP: ${req.ip}`);
-        return res.status(400).json({ error: 'Body yêu cầu không hợp lệ hoặc thiếu dữ liệu. Vui lòng gửi JSON với các trường url và platform.' });
-    }
+// Map để lưu trữ tiến trình tải
+const downloadProgressMap = new Map();
 
-    const { url, platform, type, quality } = req.body;
+// Endpoint theo dõi tiến trình tải
+app.get('/api/download-progress/:downloadId', (req, res) => {
+    const { downloadId } = req.params;
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
 
-    if (!url || !platform || !type) {
-        logger.warn(`Missing required fields (url, platform, type) from IP: ${req.ip}`);
-        return res.status(400).json({ error: 'Thiếu thông tin cần thiết (url, platform, type)' });
-    }
-
-    try {
-        await rateLimiter.consume('download_endpoint', 1);
-        logger.info(`Download request: ${type} from ${platform}, URL: ${url}, IP: ${req.ip}, Quality: ${quality}`);
-
-        const ffmpegAvailable = await checkFFmpeg();
-        if (!ffmpegAvailable) {
-            logger.error('FFmpeg is not installed or accessible');
-            return res.status(500).json({
-                error: 'FFmpeg không được cài đặt hoặc không thể truy cập. Vui lòng cài FFmpeg theo hướng dẫn tại https://ffmpeg.org/download.html và thử lại.'
-            });
+    const sendProgress = () => {
+        const progress = downloadProgressMap.get(downloadId);
+        if (progress) {
+            res.write(`data: ${JSON.stringify(progress)}\n\n`);
+            if (progress.progress === 100 || progress.error) {
+                downloadProgressMap.delete(downloadId);
+                res.end();
+            }
         }
+    };
 
-        if (platform === 'youtube') {
-            const videoId = url.match(/[?&]v=([^&]+)/)?.[1] || url.match(/youtu\.be\/([^?&]+)/)?.[1];
-            if (!videoId) {
-                logger.warn(`Invalid YouTube URL from IP: ${req.ip}: ${url}`);
-                return res.status(400).json({ error: 'URL YouTube không hợp lệ' });
-            }
+    // Gửi tiến trình ban đầu
+    sendProgress();
 
-            const availability = await checkVideoAvailability(videoId);
-            if (!availability.isAvailable) {
-                logger.warn(`Video not available: ${videoId}, reason: ${availability.reason}`);
-                return res.status(403).json({ error: availability.reason });
-            }
-
-            let videoTitle = await getVideoTitle(videoId);
-            const fileExtension = type === 'video' ? 'mp4' : 'mp3';
-            const fileName = `${videoTitle}${quality ? `_${quality}` : ''}.${fileExtension}`;
-            const filePath = path.join(__dirname, 'downloads', fileName);
-
-            if (!await fsPromises.access(path.join(__dirname, 'downloads')).then(() => true).catch(() => false)) {
-                await fsPromises.mkdir(path.join(__dirname, 'downloads'), { recursive: true });
-            }
-
-            await cleanFolder(path.join(__dirname, 'downloads'));
-
-            if (await fsPromises.access(filePath).then(() => true).catch(() => false)) {
-                logger.info(`File đã tồn tại: ${filePath}`);
-                return res.status(200).json({ success: true, downloadUrl: `/downloads/${encodeURIComponent(fileName)}` });
-            }
-
-            // Sử dụng @distube/ytdl-core để tải video/âm thanh
-            try {
-                const { format, stream } = await downloadMediaWithYtdlCore(url, type, quality);
-                logger.info(`Selected format: ${JSON.stringify(format)}`);
-
-                const fileStream = fs.createWriteStream(filePath);
-                let downloadError = null;
-                let downloadProgress = 0;
-                
-                return new Promise((resolve, reject) => {
-                    stream.pipe(fileStream);
-                    
-                    stream.on('error', (error) => {
-                        downloadError = error;
-                        logger.error(`Stream error: ${error.message}`, { 
-                            error: error.stack,
-                            url: url,
-                            type: type,
-                            format: format
-                        });
-                        fileStream.end();
-                        fs.unlink(filePath, () => {});
-                        reject(error);
-                    });
-
-                    stream.on('progress', (chunkLength, downloaded, total) => {
-                        downloadProgress = (downloaded / total) * 100;
-                        logger.info(`Download progress: ${downloadProgress.toFixed(2)}%`);
-                    });
-
-                    fileStream.on('error', (error) => {
-                        downloadError = error;
-                        logger.error(`File stream error: ${error.message}`, {
-                            error: error.stack,
-                            filePath: filePath
-                        });
-                        stream.destroy();
-                        fs.unlink(filePath, () => {});
-                        reject(error);
-                    });
-
-                    fileStream.on('finish', () => {
-                        fileStream.close();
-                        if (type === 'audio') {
-                            // Kiểm tra xem file đã là MP3 chưa
-                            const isMP3 = format.container === 'mp3' || format.mimeType.includes('mp3');
-                            if (isMP3) {
-                                // Nếu đã là MP3, chỉ cần đổi tên file
-                                fs.rename(filePath, filePath.replace('.mp4', '.mp3'), (err) => {
-                                    if (err) {
-                                        logger.error(`Error renaming file: ${err.message}`, {
-                                            error: err.stack,
-                                            from: filePath,
-                                            to: filePath.replace('.mp4', '.mp3')
-                                        });
-                                        reject(err);
-                                        return;
-                                    }
-                                    resolve();
-                                });
-                            } else {
-                                // Nếu không phải MP3, cần chuyển đổi
-                                const tempPath = filePath.replace('.mp3', '_temp.mp4');
-                                fs.rename(filePath, tempPath, async (err) => {
-                                    if (err) {
-                                        logger.error(`Error renaming file: ${err.message}`, {
-                                            error: err.stack,
-                                            from: filePath,
-                                            to: tempPath
-                                        });
-                                        reject(err);
-                                        return;
-                                    }
-                                    try {
-                                        await new Promise((resolve, reject) => {
-                                            const ffmpegCommand = ffmpeg(tempPath)
-                                                .noVideo()
-                                                .audioCodec('libmp3lame')
-                                                .audioBitrate('192k')
-                                                .audioChannels(2)
-                                                .on('start', (commandLine) => {
-                                                    logger.info(`FFmpeg command: ${commandLine}`);
-                                                })
-                                                .on('progress', (progress) => {
-                                                    logger.info(`FFmpeg progress: ${JSON.stringify(progress)}`);
-                                                })
-                                                .on('end', () => {
-                                                    logger.info('FFmpeg conversion completed successfully');
-                                                    resolve();
-                                                })
-                                                .on('error', (err) => {
-                                                    logger.error(`FFmpeg error: ${err.message}`, {
-                                                        error: err.stack,
-                                                        input: tempPath,
-                                                        output: filePath
-                                                    });
-                                                    reject(err);
-                                                });
-
-                                            logger.info('Starting FFmpeg conversion...');
-                                            ffmpegCommand.save(filePath);
-                                        });
-                                        fs.unlink(tempPath, () => {});
-                                        resolve();
-                                    } catch (error) {
-                                        logger.error(`FFmpeg conversion error: ${error.message}`, {
-                                            error: error.stack,
-                                            input: tempPath,
-                                            output: filePath
-                                        });
-                                        fs.unlink(tempPath, () => {});
-                                        reject(error);
-                                    }
-                                });
-                            }
-                        } else {
-                            resolve();
-                        }
-                    });
-                }).then(() => {
-                    if (!fs.existsSync(filePath)) {
-                        throw new Error('Download failed, file not created');
-                    }
-                    const stats = fs.statSync(filePath);
-                    if (stats.size === 0) {
-                        fs.unlinkSync(filePath);
-                        throw new Error('File tải về rỗng');
-                    }
-                    logger.info(`File tải về thành công: ${filePath}, kích thước: ${stats.size} bytes`);
-                    return res.status(200).json({ success: true, downloadUrl: `/downloads/${encodeURIComponent(fileName)}` });
-                }).catch((error) => {
-                    logger.error(`Download failed: ${error.message}`, {
-                        error: error.stack,
-                        url: url,
-                        type: type,
-                        quality: quality,
-                        downloadProgress: downloadProgress,
-                        downloadError: downloadError
-                    });
-                    return res.status(500).json({ 
-                        error: 'Không thể tải video/âm thanh. Vui lòng thử lại sau!',
-                        details: error.message,
-                        code: error.code
-                    });
-                });
-            } catch (error) {
-                logger.error(`@distube/ytdl-core download failed: ${error.message}`, {
-                    error: error.stack,
-                    url: url,
-                    type: type,
-                    quality: quality
-                });
-                return res.status(500).json({ 
-                    error: 'Không thể tải video/âm thanh từ bất kỳ nguồn nào.',
-                    details: error.message,
-                    code: error.code
-                });
-            }
+    // Kiểm tra tiến trình mỗi 500ms
+    const interval = setInterval(() => {
+        if (!downloadProgressMap.has(downloadId)) {
+            clearInterval(interval);
+            res.end();
         } else {
-            try {
-                const response = await fetchWithRetry('https://all-media-downloader1.p.rapidapi.com/media', {
-                    method: 'POST',
-                    headers: {
-                        'x-rapidapi-key': process.env.RAPIDAPI_KEY,
-                        'x-rapidapi-host': 'all-media-downloader1.p.rapidapi.com',
-                        'Content-Type': 'application/json'
-                    },
-                    data: { url, quality }
-                });
-
-                const data = response.data;
-                if (data.error) {
-                    logger.warn(`RapidAPI returned error: ${data.error}`);
-                    return res.status(400).json({ error: data.error });
-                }
-
-                if (type === 'video' && data.video) {
-                    return res.status(200).json({ downloadUrl: data.video });
-                } else if (type === 'audio' && data.audio) {
-                    return res.status(200).json({ downloadUrl: data.audio });
-                } else {
-                    logger.warn(`RapidAPI did not return expected content for type ${type}`);
-                    return res.status(400).json({ error: 'Không tìm thấy nội dung để tải. API không trả về link tải.' });
-                }
-            } catch (rapidError) {
-                logger.error(`RapidAPI Download Error: ${rapidError.message}`);
-                return res.status(500).json({
-                    error: rapidError.message || 'Lỗi từ RapidAPI. Vui lòng kiểm tra API key hoặc thử lại sau.'
-                });
-            }
+            sendProgress();
         }
+    }, 500);
+
+    // Xử lý khi client ngắt kết nối
+    req.on('close', () => {
+        clearInterval(interval);
+    });
+});
+
+// Sửa endpoint tải video/âm thanh
+app.post('/api/download', async (req, res) => {
+    try {
+        await handleDownload(req, res, downloadProgressMap);
     } catch (error) {
-        logger.error(`API Error: ${error.message}`, {
-            error: error.stack,
-            url: url,
-            platform: platform,
-            type: type,
-            quality: quality
-        });
-        if (error.code === 'ECONNABORTED') {
-            return res.status(504).json({ error: 'Yêu cầu tải nội dung hết thời gian. Vui lòng kiểm tra kết nối và thử lại!' });
-        } else if (error.code === 'RATE_LIMITER_POINTS_EXCEEDED') {
-            return res.status(429).json({ error: 'Quá nhiều yêu cầu. Vui lòng thử lại sau!' });
-        }
-        return res.status(500).json({ 
-            error: error.message || 'Lỗi server khi tải nội dung. Vui lòng thử lại sau!',
-            details: error.stack,
-            code: error.code
-        });
+        logger.error(`Download Error: ${error.message}`);
+        res.status(500).json({ error: error.message || 'Lỗi server khi tải nội dung.' });
     }
 });
 
-// Endpoint tải phụ đề
+// Sửa endpoint tải phụ đề
 app.post('/api/download-subtitle', async (req, res) => {
-    if (!req.body || Object.keys(req.body).length === 0) {
-        logger.warn(`Invalid request body from IP: ${req.ip}`);
-        return res.status(400).json({ error: 'Body yêu cầu không hợp lệ hoặc thiếu dữ liệu.' });
-    }
-
-    const { url, platform, targetLanguage, formatPreference } = req.body;
-
-    if (!url || !platform) {
-        logger.warn(`Missing required fields (url, platform) from IP: ${req.ip}`);
-        return res.status(400).json({ error: 'Thiếu thông tin cần thiết (url, platform)' });
-    }
-
-    if (!targetLanguage) {
-        logger.warn(`No subtitle language selected from IP: ${req.ip}`);
-        return res.status(400).json({ error: 'Vui lòng chọn ngôn ngữ phụ đề' });
-    }
-
     try {
-        await subtitleRateLimiter.consume(`download_subtitle_${req.ip}`, 1);
-        const selectedLanguage = targetLanguage;
-        const selectedFormat = formatPreference ? formatPreference.toLowerCase() : 'srt';
-
-        logger.info(`Download subtitle request: ${platform}, URL: ${url}, Language: ${selectedLanguage}, Format: ${selectedFormat}, IP: ${req.ip}`);
-
-        // Kiểm tra FFmpeg
-        const ffmpegAvailable = await checkFFmpeg();
-        if (!ffmpegAvailable) {
-            logger.error('FFmpeg is not installed or accessible');
-            return res.status(500).json({
-                error: 'FFmpeg không được cài đặt hoặc không thể truy cập. Vui lòng cài FFmpeg theo hướng dẫn tại https://ffmpeg.org/download.html và thử lại.'
-            });
-        }
-
-        if (platform === 'youtube') {
-            const videoId = url.match(/[?&]v=([^&]+)/)?.[1] || url.match(/youtu\.be\/([^?&]+)/)?.[1];
-            if (!videoId) {
-                logger.warn(`Invalid YouTube URL from IP: ${req.ip}: ${url}`);
-                return res.status(400).json({ error: 'URL YouTube không hợp lệ' });
-            }
-
-            // Kiểm tra tính khả dụng của phụ đề
-            const availability = await checkSubtitleAvailability(url, selectedLanguage);
-            if (!availability.available) {
-                return res.status(404).json({ 
-                    error: availability.reason,
-                    availableLanguages: availability.availableLanguages
-                });
-            }
-
-            const subtitlesDir = path.join(__dirname, 'subtitles');
-            if (!await fsPromises.access(subtitlesDir).then(() => true).catch(() => false)) {
-                await fsPromises.mkdir(subtitlesDir, { recursive: true });
-            }
-
-            await cleanFolder(subtitlesDir);
-
-            let videoTitle = await getVideoTitle(videoId);
-            let subtitleContent = null;
-            let finalSelectedLanguage = selectedLanguage;
-
-            try {
-                subtitleContent = await downloadSubtitleWithYtdlCore(url, selectedLanguage, availability.isAuto);
-                if (availability.isAuto) {
-                    finalSelectedLanguage = `${selectedLanguage}.auto`;
-                }
-            } catch (error) {
-                logger.error(`Subtitle download failed: ${error.message}`);
-                return res.status(500).json({ error: error.message });
-            }
-
-            if (!subtitleContent || subtitleContent.trim() === '') {
-                throw new Error('Nội dung phụ đề rỗng sau khi tải.');
-            }
-
-            let contentToWrite = subtitleContent;
-            if (selectedFormat === 'txt') {
-                contentToWrite = extractTextFromVtt(subtitleContent);
-            } else if (selectedFormat === 'srt') {
-                contentToWrite = convertVttToSrt(subtitleContent);
-            } else if (selectedFormat === 'vtt') {
-                // Đảm bảo nội dung VTT được định dạng đúng
-                if (subtitleContent.includes('<?xml') || subtitleContent.includes('<transcript>')) {
-                    contentToWrite = convertXmlToVtt(subtitleContent);
-                } else if (!subtitleContent.includes('WEBVTT')) {
-                    contentToWrite = `WEBVTT\n\n${subtitleContent}`;
-                }
-            } else {
-                throw new Error('Định dạng không được hỗ trợ. Chỉ hỗ trợ: srt, vtt, txt.');
-            }
-
-            if (!contentToWrite || contentToWrite.trim() === '') {
-                throw new Error(`Không thể tạo file phụ đề ${selectedFormat.toUpperCase()}. Nội dung sau khi chuyển đổi rỗng.`);
-            }
-
-            const fileName = `${videoTitle}_${finalSelectedLanguage}.${selectedFormat}`;
-            const filePath = path.join(subtitlesDir, fileName);
-            await fsPromises.writeFile(filePath, contentToWrite);
-
-            res.status(200).json({ 
-                success: true, 
-                downloadUrl: `/subtitles/${encodeURIComponent(fileName)}`, 
-                selectedLanguage: finalSelectedLanguage,
-                availableLanguages: availability.availableLanguages
-            });
-        } else {
-            // Xử lý các nền tảng khác...
-            // ... existing code ...
-        }
+        await handleDownloadSubtitle(req, res, downloadProgressMap);
     } catch (error) {
         logger.error(`Subtitle Download Error: ${error.message}`);
-        if (error.code === 'RATE_LIMITER_POINTS_EXCEEDED') {
-            return res.status(429).json({ error: 'Quá nhiều yêu cầu. Vui lòng thử lại sau vài giây!' });
-        }
-        return res.status(500).json({ error: error.message || 'Lỗi server khi tải phụ đề. Vui lòng thử lại sau!' });
+        res.status(500).json({ error: error.message || 'Lỗi server khi tải phụ đề.' });
     }
 });
 
@@ -1673,18 +1132,39 @@ app.get('/subtitles/:file', async (req, res) => {
                 return res.status(500).json({ error: 'File phụ đề rỗng. Vui lòng thử lại.' });
             }
         }
-        res.download(filePath, fileName, (err) => {
-            if (err) {
-                logger.error(`Lỗi khi gửi file phụ đề ${fileName}: ${err.message}`);
-                if (!res.headersSent) {
-                    res.status(500).json({ error: 'Lỗi khi gửi file phụ đề.' });
-                }
+
+        // Thiết lập headers cho download phụ đề
+        res.set({
+            'Content-Type': 'text/plain',
+            'Content-Disposition': `attachment; filename="${encodeURIComponent(fileName)}"`,
+            'Content-Length': stats.size,
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive'
+        });
+
+        // Tạo read stream với error handling
+        const fileStream = fs.createReadStream(filePath);
+        
+        fileStream.on('error', (error) => {
+            logger.error(`Lỗi đọc file phụ đề ${fileName}: ${error.message}`);
+            if (!res.headersSent) {
+                res.status(500).json({ error: 'Lỗi tải phụ đề' });
             }
         });
+
+        // Xử lý khi client ngắt kết nối
+        req.on('close', () => {
+            fileStream.destroy();
+            logger.info(`Client ngắt kết nối khi tải phụ đề ${fileName}`);
+        });
+
+        // Pipe file stream tới response
+        fileStream.pipe(res);
+
     } catch (error) {
         logger.error(`File phụ đề không tìm thấy: ${filePath}`);
         if (!res.headersSent) {
-            res.status(404).json({ error: 'File phụ đề không tìm thấy.' });
+            res.status(404).json({ error: 'File không tìm thấy' });
         }
     }
 });
@@ -1702,120 +1182,45 @@ app.get('/downloads/:file', async (req, res) => {
             logger.error(`File tải về rỗng: ${filePath}`);
             await fsPromises.unlink(filePath);
             if (!res.headersSent) {
-                return res.status(500).json({ error: 'File tải về rỗng. Vui lòng thử lại.' });
+                return res.status(500).json({ error: 'Lỗi tải file' });
             }
         }
 
-        res.setTimeout(600000);
-        res.download(filePath, fileName, (err) => {
-            if (err) {
-                logger.error(`Lỗi khi gửi file ${fileName}: ${err.message}`);
-                if (err.code === 'EPIPE' || err.message.includes('Request aborted')) {
-                    logger.info('Client disconnected during file download, ignoring error.');
-                } else if (!res.headersSent) {
-                    res.status(500).json({ error: 'Lỗi khi gửi file.' });
-                }
+        // Thiết lập headers cho download
+        res.set({
+            'Content-Type': 'application/octet-stream',
+            'Content-Disposition': `attachment; filename="${encodeURIComponent(fileName)}"`,
+            'Content-Length': stats.size,
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive'
+        });
+
+        // Tạo read stream với error handling
+        const fileStream = fs.createReadStream(filePath);
+        
+        fileStream.on('error', (error) => {
+            logger.error(`Lỗi đọc file ${fileName}: ${error.message}`);
+            if (!res.headersSent) {
+                res.status(500).json({ error: 'Lỗi tải file' });
             }
         });
+
+        // Xử lý khi client ngắt kết nối
+        req.on('close', () => {
+            fileStream.destroy();
+            logger.info(`Client ngắt kết nối khi tải file ${fileName}`);
+        });
+
+        // Pipe file stream tới response
+        fileStream.pipe(res);
+
     } catch (error) {
         logger.error(`File không tìm thấy: ${error.message}`);
         if (!res.headersSent) {
-            res.status(404).json({ error: 'File tải về không tìm thấy.' });
+            res.status(404).json({ error: 'File không tìm thấy' });
         }
     }
 });
-
-// Hàm chuyển đổi VTT sang SRT
-function convertVttToSrt(vttText) {
-    if (!vttText || vttText.trim() === '') {
-        logger.error('Empty VTT content for SRT conversion');
-        return null;
-    }
-
-    try {
-        // Kiểm tra nếu là XML
-        if (vttText.includes('<?xml') || vttText.includes('<transcript>')) {
-            vttText = convertXmlToVtt(vttText);
-            if (!vttText) {
-                throw new Error('Failed to convert XML to VTT');
-            }
-        }
-
-        const lines = vttText.split('\n');
-        let srtText = '';
-        let index = 1;
-        let i = 0;
-
-        // Bỏ qua header WEBVTT và các dòng trống đầu tiên
-        while (i < lines.length && (lines[i].startsWith('WEBVTT') || lines[i].trim() === '')) {
-            i++;
-        }
-
-        while (i < lines.length) {
-            if (lines[i].match(/\d{2}:\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}:\d{2}\.\d{3}/)) {
-                // Chuyển đổi timestamp từ VTT sang SRT
-                const timestamp = lines[i]
-                    .replace(/(\d{2}:\d{2}:\d{2})\.(\d{3})/g, '$1,$2')
-                    .replace(' --> ', ' --> ')
-                    .replace(/\.\d+$/, ''); // Loại bỏ phần thập phân dư thừa
-                
-                srtText += `${index}\n${timestamp}\n`;
-                i++;
-
-                // Lấy nội dung phụ đề
-                let subtitleText = '';
-                while (i < lines.length && lines[i].trim() !== '') {
-                    let cleanLine = lines[i]
-                        .replace(/<[^>]+>/g, '')
-                        .replace(/align:start/g, '')
-                        .replace(/position:\d+%/g, '')
-                        .replace(/\d{2}:\d{2}:\d{2}\.\d{3}/g, '')
-                        .replace(/<c>/g, '')
-                        .replace(/<\/c>/g, '')
-                        .replace(/&nbsp;/g, ' ')
-                        .replace(/&amp;/g, '&')
-                        .replace(/&lt;/g, '<')
-                        .replace(/&gt;/g, '>')
-                        .replace(/&quot;/g, '"')
-                        .replace(/&#39;/g, "'")
-                        .replace(/\u200B/g, '')
-                        .replace(/\u200C/g, '')
-                        .replace(/\u200D/g, '')
-                        .replace(/\u200E/g, '')
-                        .replace(/\u200F/g, '')
-                        .trim();
-
-                    if (cleanLine) {
-                        subtitleText += (subtitleText ? '\n' : '') + cleanLine;
-                    }
-                    i++;
-                }
-
-                if (subtitleText) {
-                    const truncatedText = truncateSubtitleText(subtitleText);
-                    srtText += `${truncatedText}\n\n`;
-                    index++;
-                }
-            } else {
-                i++;
-            }
-        }
-
-        const result = srtText.trim();
-        if (result === '') {
-            logger.error('Empty SRT content after conversion');
-            return null;
-        }
-
-        return result;
-    } catch (error) {
-        logger.error(`VTT to SRT conversion failed: ${error.message}`, {
-            error: error.stack,
-            vttContent: vttText
-        });
-        return null;
-    }
-}
 
 app.listen(port, () => {
     logger.info(`Server running on port ${port}, OS: ${os.platform()}, Node.js version: ${process.version}`);
