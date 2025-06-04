@@ -118,10 +118,6 @@ async function handleDownload(req, res, downloadProgressMap) {
             // Thử tải với yt-dlp trước
             try {
                 const ytDlpOptions = [
-                    url,
-                    '--format', type === 'video' ? 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best' : 'bestaudio[ext=m4a]/bestaudio/best',
-                    '--merge-output-format', type === 'video' ? 'mp4' : 'mp3',
-                    '--output', filePath,
                     '--no-check-certificates',
                     '--no-warnings',
                     '--prefer-free-formats',
@@ -143,15 +139,32 @@ async function handleDownload(req, res, downloadProgressMap) {
                     '--cookies-from-browser', 'chrome',
                     '--cookies-from-browser', 'firefox',
                     '--cookies-from-browser', 'edge',
-                    '--cookies-from-browser', 'safari',
                     '--cookies-from-browser', 'opera',
                     '--cookies-from-browser', 'brave',
                     '--cookies-from-browser', 'chromium',
-                    '--cookies-from-browser', 'vivaldi',
-                    '--cookies-from-browser', 'whale'
+                    '--cookies-from-browser', 'vivaldi'
                 ];
+
                 if (type === 'audio') {
-                    ytDlpOptions.push('--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0');
+                    const audioOptions = [
+                        ...ytDlpOptions,
+                        '--format', 'bestaudio[ext=m4a]/bestaudio/best',
+                        '--extract-audio',
+                        '--audio-format', 'mp3',
+                        '--audio-quality', '0'
+                    ];
+                    const audioCommand = ytDlp(url, audioOptions);
+                    // ... rest of audio download code ...
+                }
+
+                if (type === 'video') {
+                    const videoOptions = [
+                        ...ytDlpOptions,
+                        '--format', 'bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+                        '--merge-output-format', 'mp4'
+                    ];
+                    const videoCommand = ytDlp(url, videoOptions);
+                    // ... rest of video download code ...
                 }
 
                 await ytDlp.exec(ytDlpOptions);
