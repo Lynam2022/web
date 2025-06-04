@@ -147,10 +147,17 @@ function detectSubtitleLanguage(content) {
 // Hàm tải phụ đề bằng yt-dlp với kiểm tra ngôn ngữ
 async function downloadSubtitleWithYtDlp(videoId, language) {
     try {
-        const outputPath = path.join(DOWNLOAD_DIR, `${videoId}_${language}.vtt`);
-        
         // Ensure download directory exists
         await ensureDownloadDir();
+
+        // Create base filename without extension
+        const baseFilename = `${videoId}_${language}`;
+        const outputPath = path.join(DOWNLOAD_DIR, `${baseFilename}.vtt`);
+        
+        logger.info(`Starting subtitle download for video ${videoId} in ${language}`, {
+            outputPath,
+            downloadDir: DOWNLOAD_DIR
+        });
 
         const options = {
             skipDownload: true,
@@ -158,7 +165,7 @@ async function downloadSubtitleWithYtDlp(videoId, language) {
             writeAutoSub: true,
             subLang: language,
             convertSubs: 'vtt',
-            output: outputPath,
+            output: path.join(DOWNLOAD_DIR, baseFilename), // Remove extension for yt-dlp
             noCheckCertificates: true,
             noWarnings: true,
             addHeader: [
@@ -172,41 +179,135 @@ async function downloadSubtitleWithYtDlp(videoId, language) {
             socketTimeout: 3000,
             retries: 10,
             fragmentRetries: 10,
-            fileAccessRetries: 10
+            fileAccessRetries: 10,
+            progress: true
         };
 
         const url = `https://www.youtube.com/watch?v=${videoId}`;
         
         try {
-            await ytDlp(url, options);
-            
-            // Check if subtitle file exists
-            if (!fs.existsSync(outputPath)) {
-                throw new Error('Subtitle file not found after download');
-            }
-            
-            // Read subtitle content
-            const subtitleContent = fs.readFileSync(outputPath, 'utf8');
-            if (!subtitleContent || subtitleContent.trim() === '') {
-                throw new Error('Subtitle content is empty');
-            }
-            
-            return subtitleContent;
-        } catch (error) {
-            logger.error(`Error in yt-dlp command: ${error.message}`, {
-                error: error.stack,
-                videoId,
-                language
+            logger.info(`Executing yt-dlp command for subtitles`, {
+                url,
+                options
             });
-            throw new Error(`Lỗi khi tải phụ đề: ${error.message}`);
+
+            // Tạo command với event listeners
+            const command = ytDlp(url, options);
+            
+            // Xử lý tiến trình tải xuống
+            command.on('progress', (progress) => {
+                if (progress.percent) {
+                    const percent = Math.round(progress.percent);
+                    logger.info(`Subtitle download progress: ${percent}%`, {
+                        videoId,
+                        language
+                    });
+                }
+            });
+
+            // Xử lý khi tải xong
+            command.on('end', async () => {
+                // Check for possible subtitle file paths
+                const possiblePaths = [
+                    outputPath,
+                    path.join(DOWNLOAD_DIR, `${baseFilename}.${language}.vtt`),
+                    path.join(DOWNLOAD_DIR, `${baseFilename}.vtt`),
+                    path.join(DOWNLOAD_DIR, `${videoId}.${language}.vtt`),
+                    path.join(DOWNLOAD_DIR, `${videoId}.vtt`)
+                ];
+
+                logger.info(`Checking for subtitle files in possible locations`, {
+                    possiblePaths
+                });
+
+                let subtitlePath = null;
+                for (const path of possiblePaths) {
+                    if (fs.existsSync(path)) {
+                        subtitlePath = path;
+                        break;
+                    }
+                }
+
+                if (!subtitlePath) {
+                    const errorDetails = {
+                        videoId,
+                        language,
+                        downloadDir: DOWNLOAD_DIR,
+                        possiblePaths,
+                        error: 'Không tìm thấy file phụ đề sau khi tải. Có thể video không có phụ đề hoặc phụ đề không khả dụng cho ngôn ngữ này.'
+                    };
+                    logger.error(`No subtitle file found in any expected location`, errorDetails);
+                    throw new Error(`Lỗi khi tải phụ đề: ${errorDetails.error}\nChi tiết: ${JSON.stringify(errorDetails, null, 2)}`);
+                }
+
+                logger.info(`Found subtitle file at: ${subtitlePath}`);
+                
+                // Read subtitle content
+                const subtitleContent = fs.readFileSync(subtitlePath, 'utf8');
+                if (!subtitleContent || subtitleContent.trim() === '') {
+                    const errorDetails = {
+                        path: subtitlePath,
+                        fileSize: fs.statSync(subtitlePath).size,
+                        error: 'File phụ đề trống hoặc không có nội dung'
+                    };
+                    logger.error(`Subtitle file is empty`, errorDetails);
+                    throw new Error(`Lỗi khi tải phụ đề: ${errorDetails.error}\nChi tiết: ${JSON.stringify(errorDetails, null, 2)}`);
+                }
+
+                // Clean up any extra files
+                for (const path of possiblePaths) {
+                    if (path !== subtitlePath && fs.existsSync(path)) {
+                        fs.unlinkSync(path);
+                    }
+                }
+
+                // Move the found file to the expected location if needed
+                if (subtitlePath !== outputPath) {
+                    fs.renameSync(subtitlePath, outputPath);
+                }
+                
+                logger.info(`Successfully downloaded and processed subtitle file`, {
+                    finalPath: outputPath,
+                    fileSize: fs.statSync(outputPath).size
+                });
+
+                return subtitleContent;
+            });
+
+            // Xử lý lỗi
+            command.on('error', (error) => {
+                const errorDetails = {
+                    videoId,
+                    language,
+                    downloadDir: DOWNLOAD_DIR,
+                    error: error.message,
+                    stack: error.stack
+                };
+                logger.error(`Error in yt-dlp command: ${error.message}`, errorDetails);
+                throw new Error(`Lỗi khi tải phụ đề: ${error.message}\nChi tiết: ${JSON.stringify(errorDetails, null, 2)}`);
+            });
+
+        } catch (error) {
+            const errorDetails = {
+                videoId,
+                language,
+                downloadDir: DOWNLOAD_DIR,
+                error: error.message,
+                stack: error.stack
+            };
+            logger.error(`Error in yt-dlp command: ${error.message}`, errorDetails);
+            throw new Error(`Lỗi khi tải phụ đề: ${error.message}\nChi tiết: ${JSON.stringify(errorDetails, null, 2)}`);
         }
     } catch (error) {
-        logger.error(`Error in downloadSubtitleWithYtDlp: ${error.message}`, {
-            error: error.stack,
+        const errorDetails = {
             videoId,
-            language
-        });
-        throw error;
+            language,
+            downloadDir: DOWNLOAD_DIR,
+            error: error.message,
+            stack: error.stack
+        };
+        logger.error(`Error in downloadSubtitleWithYtDlp: ${error.message}`, errorDetails);
+        throw new Error(`Lỗi khi tải phụ đề: ${error.message}\nChi tiết: ${JSON.stringify(errorDetails, null, 2)}`);
     }
 }
 

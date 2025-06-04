@@ -166,43 +166,170 @@ async function handleDownload(req, res, downloadProgressMap) {
                 maxDownloads: 1,
                 socketTimeout: 3000,
                 sourceAddress: '0.0.0.0',
-                cookiesFromBrowser: ['chrome', 'firefox', 'edge', 'opera', 'brave', 'chromium', 'vivaldi']
+                cookiesFromBrowser: ['chrome', 'firefox', 'edge', 'opera', 'brave', 'chromium'],
+                progress: true
             };
 
             try {
-                await ytDlp(url, ytDlpOptions);
-                
-                // Check if file exists
-                if (!fs.existsSync(filePath)) {
-                    throw new Error('File not found after download');
-                }
-                
-                // Check file size
-                const stats = fs.statSync(filePath);
-                if (stats.size === 0) {
-                    throw new Error('Downloaded file is empty');
-                }
-                
-                logger.info(`Successfully downloaded with yt-dlp: ${filePath}`);
-                return res.json({ 
-                    success: true, 
-                    message: 'Tải xuống thành công',
+                // Khởi tạo tiến trình tải xuống
+                downloadProgressMap.set(downloadId, {
+                    progress: 0,
+                    status: 'downloading',
+                    error: null,
                     filePath: filePath
                 });
-            } catch (error) {
-                logger.error(`Error in yt-dlp command: ${error.message}`, {
-                    error: error.stack,
-                    url: url,
-                    type: type
+
+                // Tạo command với event listeners
+                const command = ytDlp(url, ytDlpOptions);
+                
+                // Xử lý tiến trình tải xuống
+                command.on('progress', (progress) => {
+                    if (progress.percent) {
+                        const percent = Math.round(progress.percent);
+                        downloadProgressMap.set(downloadId, {
+                            progress: percent,
+                            status: 'downloading',
+                            error: null,
+                            filePath: filePath
+                        });
+                        logger.info(`Download progress: ${percent}%`, {
+                            videoId: url,
+                            type: type,
+                            downloadId: downloadId
+                        });
+                    }
                 });
-                throw new Error(`Lỗi khi tải ${type}: ${error.message}`);
+
+                // Xử lý khi tải xong
+                command.on('end', async () => {
+                    try {
+                        // Check if file exists
+                        if (!fs.existsSync(filePath)) {
+                            const errorDetails = {
+                                url,
+                                type,
+                                filePath,
+                                downloadDir: DOWNLOAD_DIR,
+                                error: 'Không tìm thấy file sau khi tải. Có thể video không khả dụng hoặc bị chặn.'
+                            };
+                            logger.error(`File not found after download`, errorDetails);
+                            downloadProgressMap.set(downloadId, {
+                                progress: 0,
+                                status: 'error',
+                                error: errorDetails.error,
+                                filePath: null
+                            });
+                            throw new Error(`Lỗi khi tải ${type}: ${errorDetails.error}\nChi tiết: ${JSON.stringify(errorDetails, null, 2)}`);
+                        }
+                        
+                        // Check file size
+                        const stats = fs.statSync(filePath);
+                        if (stats.size === 0) {
+                            const errorDetails = {
+                                url,
+                                type,
+                                filePath,
+                                fileSize: stats.size,
+                                error: 'File tải về trống hoặc không có nội dung'
+                            };
+                            logger.error(`Downloaded file is empty`, errorDetails);
+                            downloadProgressMap.set(downloadId, {
+                                progress: 0,
+                                status: 'error',
+                                error: errorDetails.error,
+                                filePath: null
+                            });
+                            throw new Error(`Lỗi khi tải ${type}: ${errorDetails.error}\nChi tiết: ${JSON.stringify(errorDetails, null, 2)}`);
+                        }
+                        
+                        // Cập nhật trạng thái hoàn thành
+                        downloadProgressMap.set(downloadId, {
+                            progress: 100,
+                            status: 'completed',
+                            error: null,
+                            filePath: filePath
+                        });
+
+                        logger.info(`Successfully downloaded with yt-dlp: ${filePath}`, {
+                            fileSize: stats.size,
+                            type
+                        });
+
+                        res.json({ 
+                            success: true, 
+                            message: 'Tải xuống thành công',
+                            filePath: filePath,
+                            fileSize: stats.size,
+                            downloadId
+                        });
+                    } catch (error) {
+                        const errorDetails = {
+                            url,
+                            type,
+                            filePath,
+                            downloadDir: DOWNLOAD_DIR,
+                            error: error.message,
+                            stack: error.stack
+                        };
+                        logger.error(`Error processing downloaded file: ${error.message}`, errorDetails);
+                        downloadProgressMap.set(downloadId, {
+                            progress: 0,
+                            status: 'error',
+                            error: error.message,
+                            filePath: null
+                        });
+                        throw error;
+                    }
+                });
+
+                // Xử lý lỗi
+                command.on('error', (error) => {
+                    const errorDetails = {
+                        url,
+                        type,
+                        filePath,
+                        downloadDir: DOWNLOAD_DIR,
+                        error: error.message,
+                        stack: error.stack
+                    };
+                    logger.error(`Error in yt-dlp command: ${error.message}`, errorDetails);
+                    downloadProgressMap.set(downloadId, {
+                        progress: 0,
+                        status: 'error',
+                        error: error.message,
+                        filePath: null
+                    });
+                    throw new Error(`Lỗi khi tải ${type}: ${error.message}\nChi tiết: ${JSON.stringify(errorDetails, null, 2)}`);
+                });
+
+            } catch (error) {
+                const errorDetails = {
+                    url,
+                    type,
+                    filePath,
+                    downloadDir: DOWNLOAD_DIR,
+                    error: error.message,
+                    stack: error.stack
+                };
+                logger.error(`Error in yt-dlp command: ${error.message}`, errorDetails);
+                downloadProgressMap.set(downloadId, {
+                    progress: 0,
+                    status: 'error',
+                    error: error.message,
+                    filePath: null
+                });
+                throw new Error(`Lỗi khi tải ${type}: ${error.message}\nChi tiết: ${JSON.stringify(errorDetails, null, 2)}`);
             }
         } catch (error) {
-            logger.error(`yt-dlp download failed: ${error.message}`, {
-                error: error.stack,
-                url: url,
-                type: type
-            });
+            const errorDetails = {
+                url,
+                type,
+                filePath,
+                downloadDir: DOWNLOAD_DIR,
+                error: error.message,
+                stack: error.stack
+            };
+            logger.error(`yt-dlp download failed: ${error.message}`, errorDetails);
             // Tiếp tục với phương thức dự phòng
         }
 
