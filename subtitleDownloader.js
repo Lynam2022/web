@@ -20,6 +20,7 @@ const {
 } = require('./utils');
 const { JSDOM } = require('jsdom');
 const { DOWNLOAD_DIR } = require('./videoDownloader');
+const fs = require('fs');
 
 // Rate Limiter cho tải phụ đề: Giới hạn 5 request/giây
 const subtitleRateLimiter = new RateLimiterMemory({
@@ -146,68 +147,59 @@ function detectSubtitleLanguage(content) {
 // Hàm tải phụ đề bằng yt-dlp với kiểm tra ngôn ngữ
 async function downloadSubtitleWithYtDlp(videoId, language) {
     try {
+        const outputPath = path.join(DOWNLOAD_DIR, `${videoId}_${language}.vtt`);
+        
         // Ensure download directory exists
         await ensureDownloadDir();
 
-        const outputPath = path.join(DOWNLOAD_DIR, `${videoId}_${language}.vtt`);
-        const options = [
-            '--skip-download',
-            '--write-sub',
-            '--write-auto-sub',
-            '--sub-lang', language,
-            '--convert-subs', 'vtt',
-            '--output', outputPath,
-            '--no-check-certificates',
-            '--no-warnings',
-            '--add-header', 'referer:youtube.com',
-            '--add-header', 'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            '--add-header', 'accept-language:en-US,en;q=0.9',
-            '--socket-timeout', '3000',
-            '--retries', '10',
-            '--fragment-retries', '10',
-            '--file-access-retries', '10'
-        ];
+        const options = {
+            skipDownload: true,
+            writeSub: true,
+            writeAutoSub: true,
+            subLang: language,
+            convertSubs: 'vtt',
+            output: outputPath,
+            noCheckCertificates: true,
+            noWarnings: true,
+            addHeader: [
+                'referer:youtube.com',
+                'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'accept-language:en-US,en;q=0.9',
+                'sec-ch-ua:"Not_A Brand";v="8", "Chromium";v="120"',
+                'sec-ch-ua-mobile:?0',
+                'sec-ch-ua-platform:"Windows"'
+            ],
+            socketTimeout: 3000,
+            retries: 10,
+            fragmentRetries: 10,
+            fileAccessRetries: 10
+        };
 
-        logger.info(`Attempting to download subtitle with yt-dlp for video ${videoId} in ${language}`);
+        const url = `https://www.youtube.com/watch?v=${videoId}`;
         
-        const command = ytDlp(`https://www.youtube.com/watch?v=${videoId}`, options);
-        
-        return new Promise((resolve, reject) => {
-            let errorOutput = '';
+        try {
+            await ytDlp(url, options);
             
-            command.on('error', (error) => {
-                logger.error(`yt-dlp subtitle download error: ${error.message}`, {
-                    error: error.stack,
-                    videoId,
-                    language,
-                    options
-                });
-                reject(new Error(`Lỗi khi tải phụ đề: ${error.message}`));
+            // Check if subtitle file exists
+            if (!fs.existsSync(outputPath)) {
+                throw new Error('Subtitle file not found after download');
+            }
+            
+            // Read subtitle content
+            const subtitleContent = fs.readFileSync(outputPath, 'utf8');
+            if (!subtitleContent || subtitleContent.trim() === '') {
+                throw new Error('Subtitle content is empty');
+            }
+            
+            return subtitleContent;
+        } catch (error) {
+            logger.error(`Error in yt-dlp command: ${error.message}`, {
+                error: error.stack,
+                videoId,
+                language
             });
-
-            command.stderr.on('data', (data) => {
-                errorOutput += data.toString();
-            });
-
-            command.on('end', async () => {
-                try {
-                    if (errorOutput.includes('No subtitles found')) {
-                        throw new Error(`Không tìm thấy phụ đề cho ngôn ngữ ${language}`);
-                    }
-
-                    const vttPath = outputPath.replace(/\.[^/.]+$/, '.vtt');
-                    if (await fsPromises.access(vttPath).then(() => true).catch(() => false)) {
-                        const content = await fsPromises.readFile(vttPath, 'utf8');
-                        await fsPromises.unlink(vttPath).catch(() => {});
-                        resolve(content);
-                    } else {
-                        throw new Error('Không tìm thấy file phụ đề sau khi tải');
-                    }
-                } catch (error) {
-                    reject(error);
-                }
-            });
-        });
+            throw new Error(`Lỗi khi tải phụ đề: ${error.message}`);
+        }
     } catch (error) {
         logger.error(`Error in downloadSubtitleWithYtDlp: ${error.message}`, {
             error: error.stack,
