@@ -389,7 +389,16 @@ async function downloadSubtitleWithYouTubeAPI(videoId, language) {
             responseType: 'text',
             timeout: 10000,
             retries: 3,
-            delay: 1000
+            delay: 1000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Origin': 'https://www.youtube.com',
+                'Referer': 'https://www.youtube.com/'
+            }
         });
 
         if (manualResponse && manualResponse.data) {
@@ -405,7 +414,16 @@ async function downloadSubtitleWithYouTubeAPI(videoId, language) {
             responseType: 'text',
             timeout: 10000,
             retries: 3,
-            delay: 1000
+            delay: 1000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Origin': 'https://www.youtube.com',
+                'Referer': 'https://www.youtube.com/'
+            }
         });
 
         if (autoResponse && autoResponse.data) {
@@ -421,7 +439,16 @@ async function downloadSubtitleWithYouTubeAPI(videoId, language) {
             responseType: 'text',
             timeout: 10000,
             retries: 3,
-            delay: 1000
+            delay: 1000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Origin': 'https://www.youtube.com',
+                'Referer': 'https://www.youtube.com/'
+            }
         });
 
         if (enResponse && enResponse.data) {
@@ -430,6 +457,42 @@ async function downloadSubtitleWithYouTubeAPI(videoId, language) {
                 logger.info(`Using English subtitles as fallback for ${language}`);
                 return content;
             }
+        }
+
+        // Thử tải phụ đề bằng yt-dlp
+        try {
+            const tempDir = path.join(__dirname, 'temp');
+            if (!await fsPromises.access(tempDir).then(() => true).catch(() => false)) {
+                await fsPromises.mkdir(tempDir, { recursive: true });
+            }
+
+            const outputPath = path.join(tempDir, `${videoId}_${language}.vtt`);
+            const ytDlpOptions = [
+                `https://www.youtube.com/watch?v=${videoId}`,
+                '--skip-download',
+                '--write-sub',
+                '--sub-lang', language,
+                '--sub-format', 'vtt',
+                '--output', outputPath,
+                '--no-check-certificates',
+                '--no-warnings',
+                '--prefer-free-formats',
+                '--add-header', 'referer:youtube.com',
+                '--add-header', 'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                '--cookies-from-browser', 'chrome'
+            ];
+
+            await ytDlp.exec(ytDlpOptions);
+            
+            if (await fsPromises.access(outputPath).then(() => true).catch(() => false)) {
+                const content = await fsPromises.readFile(outputPath, 'utf8');
+                await fsPromises.unlink(outputPath);
+                if (content && content.trim() !== '') {
+                    return content;
+                }
+            }
+        } catch (ytDlpError) {
+            logger.error(`yt-dlp subtitle download failed: ${ytDlpError.message}`);
         }
 
         logger.warn(`No subtitles found with YouTube API for language ${language}`);

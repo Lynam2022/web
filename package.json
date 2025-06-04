@@ -12,7 +12,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "@distube/ytdl-core": "^4.11.4",
+    "@distube/ytdl-core": "^4.16.11",
     "@treeee/youtube-caption-extractor": "^1.0.0",
     "axios": "^1.6.2",
     "dotenv": "^16.3.1",
