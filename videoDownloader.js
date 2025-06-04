@@ -126,20 +126,36 @@ async function handleDownload(req, res, downloadProgressMap) {
                     '--no-warnings',
                     '--prefer-free-formats',
                     '--add-header', 'referer:youtube.com',
-                    '--add-header', 'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    '--add-header', 'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    '--add-header', 'accept-language:en-US,en;q=0.9',
+                    '--add-header', 'sec-ch-ua:"Not_A Brand";v="8", "Chromium";v="120"',
+                    '--add-header', 'sec-ch-ua-mobile:?0',
+                    '--add-header', 'sec-ch-ua-platform:"Windows"',
                     '--concurrent', '4',
                     '--buffer-size', '1048576',
-                    '--retries', '3',
-                    '--fragment-retries', '3',
-                    '--file-access-retries', '3',
-                    '--max-filesize', '2G',
+                    '--retries', '10',
+                    '--fragment-retries', '10',
+                    '--file-access-retries', '10',
+                    '--max-filesize', '4G',
                     '--max-downloads', '1',
-                    '--socket-timeout', '30',
+                    '--socket-timeout', '3000',
                     '--source-address', '0.0.0.0',
-                    '--proxy', process.env.HTTP_PROXY || '',
-                    '--cookies-from-browser', 'chrome'
+                    '--cookies-from-browser', 'chrome',
+                    '--cookies-from-browser', 'firefox',
+                    '--cookies-from-browser', 'edge',
+                    '--cookies-from-browser', 'safari',
+                    '--cookies-from-browser', 'opera',
+                    '--cookies-from-browser', 'brave',
+                    '--cookies-from-browser', 'chromium',
+                    '--cookies-from-browser', 'vivaldi',
+                    '--cookies-from-browser', 'librewolf',
+                    '--cookies-from-browser', 'waterfox',
+                    '--cookies-from-browser', 'palemoon',
+                    '--cookies-from-browser', 'firefox-developer-edition',
+                    '--cookies-from-browser', 'firefox-nightly',
+                    '--cookies-from-browser', 'firefox-beta',
+                    '--cookies-from-browser', 'firefox-esr',
                 ];
-
                 if (type === 'audio') {
                     ytDlpOptions.push('--extract-audio', '--audio-format', 'mp3', '--audio-quality', '0');
                 }
@@ -160,6 +176,9 @@ async function handleDownload(req, res, downloadProgressMap) {
                 }
             } catch (ytDlpError) {
                 logger.error(`yt-dlp download failed: ${ytDlpError.message}`);
+                if (ytDlpError.message && (ytDlpError.message.includes("Sign in to confirm you're not a bot") || ytDlpError.message.includes("Sign in to confirm you're not a bot"))) {
+                    return res.status(403).json({ error: 'YouTube yêu cầu đăng nhập để xác nhận bạn không phải là bot. Vui lòng thử lại sau hoặc sử dụng cookies cá nhân.' });
+                }
                 // Thử phương pháp khác nếu yt-dlp thất bại
             }
 
