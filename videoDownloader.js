@@ -18,6 +18,24 @@ const {
     getVideoTitle
 } = require('./utils');
 
+// Define download directory
+const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
+
+// Ensure download directory exists
+async function ensureDownloadDir() {
+    try {
+        await fsPromises.access(DOWNLOAD_DIR);
+    } catch (error) {
+        await fsPromises.mkdir(DOWNLOAD_DIR, { recursive: true });
+        logger.info(`Created download directory: ${DOWNLOAD_DIR}`);
+    }
+}
+
+// Initialize download directory
+ensureDownloadDir().catch(error => {
+    logger.error(`Failed to create download directory: ${error.message}`);
+});
+
 // Rate Limiter: Giới hạn 50 request/phút cho endpoint tải video
 const rateLimiter = new RateLimiterMemory({
     points: 50,
@@ -82,6 +100,9 @@ async function handleDownload(req, res, downloadProgressMap) {
     }
 
     try {
+        // Ensure download directory exists
+        await ensureDownloadDir();
+
         // Kiểm tra video có tồn tại không
         const videoInfo = await ytdl.getInfo(url, {
             timeout: 30000,
@@ -284,5 +305,6 @@ async function sendFile(req, res, filePath, fileName) {
 
 module.exports = {
     handleDownload,
-    sendFile
+    sendFile,
+    DOWNLOAD_DIR // Export DOWNLOAD_DIR for use in other modules
 };

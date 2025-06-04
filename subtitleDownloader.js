@@ -19,6 +19,7 @@ const {
     getDefaultLanguage
 } = require('./utils');
 const { JSDOM } = require('jsdom');
+const { DOWNLOAD_DIR } = require('./videoDownloader');
 
 // Rate Limiter cho tải phụ đề: Giới hạn 5 request/giây
 const subtitleRateLimiter = new RateLimiterMemory({
@@ -145,6 +146,9 @@ function detectSubtitleLanguage(content) {
 // Hàm tải phụ đề bằng yt-dlp với kiểm tra ngôn ngữ
 async function downloadSubtitleWithYtDlp(videoId, language) {
     try {
+        // Ensure download directory exists
+        await ensureDownloadDir();
+
         const outputPath = path.join(DOWNLOAD_DIR, `${videoId}_${language}.vtt`);
         const options = [
             '--skip-download',
@@ -998,6 +1002,21 @@ function msToTime(ms) {
 function pad(num, size = 2) {
     return num.toString().padStart(size, '0');
 }
+
+// Ensure download directory exists
+async function ensureDownloadDir() {
+    try {
+        await fsPromises.access(DOWNLOAD_DIR);
+    } catch (error) {
+        await fsPromises.mkdir(DOWNLOAD_DIR, { recursive: true });
+        logger.info(`Created download directory: ${DOWNLOAD_DIR}`);
+    }
+}
+
+// Initialize download directory
+ensureDownloadDir().catch(error => {
+    logger.error(`Failed to create download directory: ${error.message}`);
+});
 
 module.exports = {
     handleDownloadSubtitle,
