@@ -1,6 +1,7 @@
 // videoDownloader.js
 const { RateLimiterMemory } = require('rate-limiter-flexible');
-const fs = require('fs').promises;
+const fs = require('fs');
+const fsPromises = require('fs').promises;
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const ytdl = require('@distube/ytdl-core');
@@ -121,25 +122,25 @@ async function handleDownload(req, res, downloadProgressMap) {
         const filePath = path.join(__dirname, 'downloads', fileName);
 
         // Tạo thư mục lưu trữ nếu chưa tồn tại
-        if (!await fs.access(path.join(__dirname, 'downloads')).then(() => true).catch(() => false)) {
-            await fs.mkdir(path.join(__dirname, 'downloads'), { recursive: true });
+        if (!await fsPromises.access(path.join(__dirname, 'downloads')).then(() => true).catch(() => false)) {
+            await fsPromises.mkdir(path.join(__dirname, 'downloads'), { recursive: true });
         }
 
         // Dọn dẹp thư mục downloads
         await cleanFolder(path.join(__dirname, 'downloads'));
 
         // Kiểm tra nếu file đã tồn tại
-        if (await fs.access(filePath).then(() => true).catch(() => false)) {
-            const stats = await fs.stat(filePath);
+        if (await fsPromises.access(filePath).then(() => true).catch(() => false)) {
+            const stats = await fsPromises.stat(filePath);
             if (stats.size === 0) {
                 logger.error(`Existing file is empty: ${filePath}`);
-                await fs.unlink(filePath);
+                await fsPromises.unlink(filePath);
             } else {
                 logger.info(`File đã tồn tại: ${filePath}`);
                 const isValid = await validateFile(filePath, type);
                 if (!isValid) {
                     logger.error(`File tồn tại nhưng không hợp lệ: ${filePath}`);
-                    await fs.unlink(filePath);
+                    await fsPromises.unlink(filePath);
                 } else {
                     downloadProgressMap.set(downloadId, { progress: 100, downloadUrl: `/downloads/${encodeURIComponent(fileName)}`, error: null });
                     return res.status(200).json({ success: true, downloadUrl: `/downloads/${encodeURIComponent(fileName)}` });
@@ -162,12 +163,26 @@ async function handleDownload(req, res, downloadProgressMap) {
                     const options = type === 'video' ? {
                         format: 'bestvideo+bestaudio/best',
                         output: `${outputPath}.%(ext)s`,
-                        mergeOutputFormat: 'mp4'
+                        mergeOutputFormat: 'mp4',
+                        noCheckCertificates: true,
+                        noWarnings: true,
+                        preferFreeFormats: true,
+                        addHeader: [
+                            'referer:youtube.com',
+                            'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                        ]
                     } : {
                         format: 'bestaudio',
                         extractAudio: true,
                         audioFormat: 'mp3',
-                        output: `${outputPath}.%(ext)s`
+                        output: `${outputPath}.%(ext)s`,
+                        noCheckCertificates: true,
+                        noWarnings: true,
+                        preferFreeFormats: true,
+                        addHeader: [
+                            'referer:youtube.com',
+                            'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                        ]
                     };
 
                     const child = ytDlp.exec(url, options, { stdio: ['pipe', 'pipe', 'pipe'] });
@@ -270,8 +285,8 @@ async function handleDownload(req, res, downloadProgressMap) {
                             }
 
                             // Xóa file tạm
-                            await fs.unlink(videoPath);
-                            await fs.unlink(audioPath);
+                            await fsPromises.unlink(videoPath);
+                            await fsPromises.unlink(audioPath);
                         } else {
                             // Tải âm thanh
                             const stream = ytdl(url, { quality: selectedItag, filter: 'audioonly' });
@@ -295,7 +310,7 @@ async function handleDownload(req, res, downloadProgressMap) {
                             }
 
                             const tempPath = filePath.replace('.mp3', '_temp.mp4');
-                            await fs.rename(filePath, tempPath);
+                            await fsPromises.rename(filePath, tempPath);
                             let ffmpegError = '';
                             await new Promise((resolve, reject) => {
                                 ffmpeg(tempPath)
@@ -311,7 +326,7 @@ async function handleDownload(req, res, downloadProgressMap) {
                             if (ffmpegError) {
                                 throw new Error(`FFmpeg conversion failed: ${ffmpegError}`);
                             }
-                            await fs.unlink(tempPath);
+                            await fsPromises.unlink(tempPath);
                         }
                     } catch (fallbackError) {
                         logger.error(`@distube/ytdl-core download failed: ${fallbackError.message}`);
@@ -321,16 +336,16 @@ async function handleDownload(req, res, downloadProgressMap) {
                 }
 
                 // Kiểm tra lại file trước khi trả về URL
-                if (!await fs.access(filePath).then(() => true).catch(() => false)) {
+                if (!await fsPromises.access(filePath).then(() => true).catch(() => false)) {
                     logger.error(`Download failed, file not created: ${filePath}`);
                     downloadProgressMap.set(downloadId, { progress: 0, error: 'Tải xuống thất bại. File không được tạo.' });
                     return;
                 }
 
-                const stats = await fs.stat(filePath);
+                const stats = await fsPromises.stat(filePath);
                 if (stats.size === 0) {
                     logger.error(`File tải về rỗng: ${filePath}`);
-                    await fs.unlink(filePath);
+                    await fsPromises.unlink(filePath);
                     downloadProgressMap.set(downloadId, { progress: 0, error: 'File tải về rỗng. Vui lòng thử lại.' });
                     return;
                 }
@@ -339,7 +354,7 @@ async function handleDownload(req, res, downloadProgressMap) {
                 const isValid = await validateFile(filePath, type);
                 if (!isValid) {
                     logger.error(`File không hợp lệ sau khi tải: ${filePath}`);
-                    await fs.unlink(filePath);
+                    await fsPromises.unlink(filePath);
                     downloadProgressMap.set(downloadId, { progress: 0, error: 'File không hợp lệ. Vui lòng thử lại.' });
                     return;
                 }

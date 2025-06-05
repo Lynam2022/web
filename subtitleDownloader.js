@@ -1,6 +1,5 @@
 // subtitleDownloader.js
 const { RateLimiterMemory } = require('rate-limiter-flexible');
-const fs = require('fs');
 const fsPromises = require('fs').promises;
 const path = require('path');
 const { v4: uuidv4 } = require('uuid');
@@ -19,6 +18,7 @@ const {
     checkVideoAvailability,
     getDefaultLanguage
 } = require('./utils');
+const { JSDOM } = require('jsdom');
 
 // Rate Limiter cho tải phụ đề: Giới hạn 5 request/giây
 const subtitleRateLimiter = new RateLimiterMemory({
@@ -74,14 +74,15 @@ function cleanSubtitleContent(content) {
             }
 
             // Kiểm tra nội dung phụ đề có chứa ký tự hợp lệ không
-            return /[\p{L}\p{N}\p{P}\p{Z}\p{S}]/u.test(trimmedLine);
+            // Mở rộng phạm vi ký tự hợp lệ để bao gồm nhiều ngôn ngữ hơn
+            return /[\p{L}\p{N}\p{P}\p{Z}\p{S}\p{M}]/u.test(trimmedLine);
         });
 
         cleanedContent = validLines.join('\n').trim();
 
         // Kiểm tra xem nội dung sau khi làm sạch có hợp lệ không
-        if (!cleanedContent || !cleanedContent.includes('-->')) {
-            logger.error('No valid subtitle content after cleaning');
+        if (!cleanedContent) {
+            logger.error('No valid content after cleaning');
             logger.debug('Original content:', content);
             return null;
         }
@@ -89,7 +90,7 @@ function cleanSubtitleContent(content) {
         // Kiểm tra xem có ít nhất một dòng nội dung phụ đề không
         const hasContent = validLines.some(line => 
             !line.match(/\d{2}:\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}:\d{2}\.\d{3}/) &&
-            /[\p{L}\p{N}\p{P}\p{Z}\p{S}]/u.test(line)
+            /[\p{L}\p{N}\p{P}\p{Z}\p{S}\p{M}]/u.test(line)
         );
 
         if (!hasContent) {
@@ -97,6 +98,16 @@ function cleanSubtitleContent(content) {
             logger.debug('Cleaned content:', cleanedContent);
             return null;
         }
+
+        // Đảm bảo định dạng VTT hợp lệ
+        if (!cleanedContent.startsWith('WEBVTT')) {
+            cleanedContent = 'WEBVTT\n\n' + cleanedContent;
+        }
+
+        // Đảm bảo có khoảng trắng giữa các phần tử
+        cleanedContent = cleanedContent
+            .replace(/(\d{2}:\d{2}:\d{2}\.\d{3})-->/g, '$1 -->')
+            .replace(/(\d{2}:\d{2}:\d{2}\.\d{3})-->/g, '$1 -->');
 
         return cleanedContent;
     } catch (error) {
@@ -133,173 +144,185 @@ function detectSubtitleLanguage(content) {
 
 // Hàm tải phụ đề bằng yt-dlp với kiểm tra ngôn ngữ
 async function downloadSubtitleWithYtDlp(url, language, outputPath) {
-    const options = {
-        skipDownload: true,
-        subFormat: 'vtt',
-        output: outputPath,
-        noCheckCertificates: true,
-        noWarnings: true,
-        preferFreeFormats: true,
-        addHeader: [
-            'referer:youtube.com',
-            'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        ],
-        writeAutoSub: true,
-        writeSub: true,
-        subLang: language,
-        extractAudio: false,
-        noPlaylist: true,
-        retries: 3,
-        fragmentRetries: 3,
-        fileAccessRetries: 3,
-        retrySleeper: 1,
-        socketTimeout: 30,
-        sourceAddress: '0.0.0.0',
-        concurrent: 4,
-        bufferSize: 1024 * 1024,
-        maxFilesize: '2G',
-        maxDownloads: 1,
-        // Thêm các tùy chọn mới để khắc phục lỗi nsig
-        format: 'best',
-        noPlaylist: true,
-        noWarnings: true,
-        noCheckCertificates: true,
-        preferInsecure: true,
-        addHeader: [
-            'referer:youtube.com',
-            'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        ]
-    };
-
     try {
-        // Thử tải phụ đề thủ công trước
-        await ytDlp(url, { ...options, writeAutoSub: false });
-        
-        if (await fsPromises.access(outputPath).then(() => true).catch(() => false)) {
-            const content = await fsPromises.readFile(outputPath, 'utf8');
-            await fsPromises.unlink(outputPath).catch(() => {});
-            
-            if (content && content.trim() !== '') {
-                return content;
-            }
-        }
+        const options = {
+            skipDownload: true,
+            writeSub: true,
+            subLang: language,
+            subFormat: 'vtt',
+            output: outputPath,
+            noCheckCertificates: true,
+            noWarnings: true,
+            preferFreeFormats: true,
+            addHeader: [
+                'referer:youtube.com',
+                'user-agent:Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            ]
+        };
 
-        // Nếu không có phụ đề thủ công, thử tải phụ đề tự động
-        await ytDlp(url, { ...options, writeSub: false });
-        
-        if (await fsPromises.access(outputPath).then(() => true).catch(() => false)) {
-            const content = await fsPromises.readFile(outputPath, 'utf8');
-            await fsPromises.unlink(outputPath).catch(() => {});
-            
-            if (content && content.trim() !== '') {
-                return content;
-            }
-        }
-
-        // Thử tải phụ đề tiếng Anh nếu không tìm thấy phụ đề cho ngôn ngữ yêu cầu
-        if (language !== 'en') {
-            const enOptions = { ...options, subLang: 'en' };
-            const enOutputPath = outputPath.replace(`.${language}.`, '.en.');
-            
-            // Thử tải phụ đề thủ công tiếng Anh
-            await ytDlp(url, { ...enOptions, writeAutoSub: false });
-            
-            if (await fsPromises.access(enOutputPath).then(() => true).catch(() => false)) {
-                const content = await fsPromises.readFile(enOutputPath, 'utf8');
-                await fsPromises.unlink(enOutputPath).catch(() => {});
-                
-                if (content && content.trim() !== '') {
-                    logger.info(`Using English subtitles as fallback for ${language}`);
-                    return content;
-                }
-            }
-
-            // Thử tải phụ đề tự động tiếng Anh
-            await ytDlp(url, { ...enOptions, writeSub: false });
-            
-            if (await fsPromises.access(enOutputPath).then(() => true).catch(() => false)) {
-                const content = await fsPromises.readFile(enOutputPath, 'utf8');
-                await fsPromises.unlink(enOutputPath).catch(() => {});
-                
-                if (content && content.trim() !== '') {
-                    logger.info(`Using English auto-subtitles as fallback for ${language}`);
-                    return content;
-                }
-            }
-        }
-        
-        logger.warn(`Subtitle file not found at ${outputPath}`);
-        return null;
+        await ytDlp(url, options);
+        return true;
     } catch (error) {
-        logger.error(`yt-dlp download failed for language ${language}: ${error.message}`);
-        return null;
+        logger.error(`yt-dlp subtitle download failed: ${error.message}`);
+        return false;
     }
 }
 
 // Hàm tải phụ đề bằng @distube/ytdl-core với kiểm tra ngôn ngữ
 async function downloadSubtitleWithYtdlCore(videoId, language) {
     try {
-        logger.info(`Attempting to download subtitle with ytdl-core: ${videoId}, language: ${language}`);
-        
-        const video = await ytdl.getInfo(videoId);
-        if (!video) {
-            throw new Error('Không thể lấy thông tin video');
-        }
-
-        // Kiểm tra phụ đề có sẵn
-        const captions = video.player_response?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
-        if (!captions || captions.length === 0) {
-            throw new Error('Video không có phụ đề');
-        }
-
-        // Tìm phụ đề phù hợp
-        const targetCaption = captions.find(caption => {
-            const lang = caption.languageCode;
-            return lang === language || lang === language.replace('.auto', '');
+        const info = await ytdl.getInfo(videoId, { 
+            timeout: 30000,
+            requestOptions: {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'Accept': '*/*',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Range': 'bytes=0-'
+                }
+            }
         });
-
-        if (!targetCaption) {
-            throw new Error(`Không tìm thấy phụ đề cho ngôn ngữ ${language}`);
+        const captions = info.player_response.captions;
+        
+        if (!captions || !captions.playerCaptionsTracklistRenderer) {
+            throw new Error('Video không có phụ đề nào');
         }
 
-        // Tải phụ đề
-        const response = await fetch(targetCaption.baseUrl);
-        if (!response.ok) {
-            throw new Error(`Lỗi khi tải phụ đề: ${response.statusText}`);
-        }
+        const captionTracks = captions.playerCaptionsTracklistRenderer.captionTracks || [];
+        const translationLanguages = captions.playerCaptionsTracklistRenderer.translationLanguages || [];
+        
+        let subtitleUrl = null;
+        let selectedTrack = null;
 
-        let subtitleContent = await response.text();
-        if (!subtitleContent || subtitleContent.trim() === '') {
-            throw new Error('Nội dung phụ đề rỗng sau khi tải');
-        }
-
-        // Kiểm tra và chuyển đổi định dạng nếu cần
-        if (subtitleContent.includes('<?xml')) {
-            subtitleContent = convertXmlToVtt(subtitleContent);
-            if (!subtitleContent) {
-                throw new Error('Không thể chuyển đổi phụ đề XML sang VTT');
+        // Thử tìm phụ đề thủ công trước
+        const manualTrack = captionTracks.find(track => track.languageCode === language);
+        if (manualTrack) {
+            selectedTrack = manualTrack;
+            subtitleUrl = manualTrack.baseUrl;
+            logger.info(`Found manual subtitle for ${language}`);
+        } else {
+            // Nếu không có phụ đề thủ công, thử tìm phụ đề tự động
+            logger.info(`Manual subtitle not found for ${language}, trying auto-generated subtitles...`);
+            const autoTrack = captionTracks.find(track => track.kind === 'asr');
+            if (autoTrack) {
+                selectedTrack = autoTrack;
+                subtitleUrl = `${autoTrack.baseUrl}&tlang=${language}`;
+                logger.info(`Found auto-generated subtitle for ${language}`);
+            } else {
+                // Nếu không tìm thấy phụ đề tự động, thử dùng phụ đề thủ công đầu tiên và dịch
+                const firstManualTrack = captionTracks[0];
+                if (firstManualTrack) {
+                    selectedTrack = firstManualTrack;
+                    subtitleUrl = `${firstManualTrack.baseUrl}&tlang=${language}`;
+                    logger.info(`Using first manual track and translating to ${language}`);
+                }
             }
         }
 
-        // Làm sạch nội dung
-        subtitleContent = cleanSubtitleContent(subtitleContent);
-        if (!subtitleContent) {
-            throw new Error('Không thể làm sạch nội dung phụ đề');
+        if (!subtitleUrl) {
+            throw new Error(`Không tìm thấy phụ đề cho ngôn ngữ ${language}`);
         }
 
-        // Kiểm tra nội dung cuối cùng
-        if (!subtitleContent.includes('-->')) {
-            throw new Error('Nội dung phụ đề không hợp lệ sau khi xử lý');
-        }
-
-        logger.info(`Successfully downloaded subtitle with ytdl-core: ${videoId}, language: ${language}`);
-        return subtitleContent;
-
-    } catch (error) {
-        logger.error(`Failed to download subtitle with ytdl-core: ${error.message}`, {
-            videoId,
+        logger.info(`Downloading subtitle from URL: ${subtitleUrl}`, {
             language,
-            error: error.stack
+            trackInfo: selectedTrack ? {
+                languageCode: selectedTrack.languageCode,
+                kind: selectedTrack.kind,
+                name: selectedTrack.name?.simpleText
+            } : null
+        });
+
+        // Thử tải phụ đề với retry
+        let retries = 3;
+        let lastError = null;
+        let lastResponse = null;
+
+        while (retries > 0) {
+            try {
+                const response = await fetchWithRetry(subtitleUrl, { 
+                    responseType: 'text',
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.5',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1'
+                    }
+                }, 3, 2000);
+
+                lastResponse = response;
+
+                if (!response.data || response.data.trim() === '') {
+                    // Thử tải lại với URL khác nếu nội dung trống
+                    if (selectedTrack && selectedTrack.kind === 'asr') {
+                        // Thử tải phụ đề thủ công thay vì tự động
+                        const manualTrack = captionTracks.find(track => track.kind !== 'asr');
+                        if (manualTrack) {
+                            subtitleUrl = `${manualTrack.baseUrl}&tlang=${language}`;
+                            selectedTrack = manualTrack;
+                            logger.info(`Retrying with manual track for ${language}`);
+                            continue;
+                        }
+                    }
+                    throw new Error('Nội dung phụ đề trống từ server');
+                }
+
+                // Kiểm tra nếu là XML
+                if (response.data.includes('<?xml') || response.data.includes('<transcript>')) {
+                    const vttContent = convertXmlToVtt(response.data);
+                    if (!vttContent) {
+                        throw new Error('Không thể chuyển đổi XML sang VTT');
+                    }
+                    return vttContent;
+                }
+
+                // Kiểm tra nếu là VTT
+                if (response.data.includes('WEBVTT')) {
+                    return response.data;
+                }
+
+                // Nếu không phải XML hoặc VTT, thử chuyển đổi sang VTT
+                try {
+                    const vttContent = convertXmlToVtt(response.data);
+                    if (vttContent) {
+                        return vttContent;
+                    }
+                } catch (error) {
+                    logger.warn(`Failed to convert content to VTT: ${error.message}`);
+                }
+
+                // Nếu không thể chuyển đổi, trả về nội dung gốc
+                return response.data;
+            } catch (error) {
+                lastError = error;
+                retries--;
+                if (retries > 0) {
+                    logger.warn(`Retrying subtitle download (${retries} attempts left): ${error.message}`, {
+                        responseStatus: lastResponse?.status,
+                        responseHeaders: lastResponse?.headers,
+                        errorDetails: error.response?.data
+                    });
+                    await new Promise(resolve => setTimeout(resolve, 2000)); // Đợi 2 giây trước khi thử lại
+                }
+            }
+        }
+
+        // Log chi tiết lỗi cuối cùng
+        logger.error('Subtitle download failed after all retries', {
+            lastError: lastError?.message,
+            responseStatus: lastResponse?.status,
+            responseHeaders: lastResponse?.headers,
+            errorDetails: lastError?.response?.data,
+            url: subtitleUrl,
+            language
+        });
+
+        throw lastError || new Error('Không thể tải phụ đề sau nhiều lần thử');
+    } catch (error) {
+        logger.error(`Error downloading subtitle with ytdl-core: ${error.message}`, {
+            error: error.stack,
+            videoId: videoId,
+            language: language
         });
         throw error;
     }
@@ -420,151 +443,24 @@ async function downloadSubtitleWithYouTubeAPI(videoId, language) {
 // Hàm chuyển đổi định dạng phụ đề
 function convertSubtitleFormat(content, format) {
     if (!content || content.trim() === '') {
-        logger.error('Empty subtitle content for format conversion');
+        logger.error('Empty subtitle content');
         return null;
     }
 
     try {
-        let convertedContent = null;
         switch (format.toLowerCase()) {
             case 'srt':
-                convertedContent = convertVttToSrt(content);
-                break;
+                return convertVttToSrt(content);
             case 'txt':
-                convertedContent = extractTextFromVtt(content);
-                break;
+                return extractTextFromVtt(content);
             case 'vtt':
-                // Kiểm tra và thêm header WEBVTT nếu cần
-                convertedContent = content.includes('WEBVTT') ? content : `WEBVTT\n\n${content}`;
-                break;
+                return content.trim();
             default:
-                throw new Error(`Định dạng không được hỗ trợ: ${format}`);
+                logger.error(`Unsupported subtitle format: ${format}`);
+                return null;
         }
-
-        if (!convertedContent || convertedContent.trim() === '') {
-            logger.error(`Empty content after converting to ${format.toUpperCase()}`);
-            logger.debug('Original content:', content);
-            return null;
-        }
-
-        logger.info(`Successfully converted subtitle to ${format.toUpperCase()} format`);
-        return convertedContent;
     } catch (error) {
-        logger.error(`Error converting subtitle format: ${error.message}`);
-        logger.debug('Original content:', content);
-        return null;
-    }
-}
-
-// Hàm chuyển đổi VTT sang SRT
-function convertVttToSrt(vttText) {
-    if (!vttText || vttText.trim() === '') {
-        logger.error('Empty VTT content');
-        return null;
-    }
-
-    try {
-        // Thêm header WEBVTT nếu chưa có
-        if (!vttText.includes('WEBVTT')) {
-            vttText = `WEBVTT\n\n${vttText}`;
-        }
-
-        let srtText = '';
-        const lines = vttText.split('\n');
-        let i = 0;
-        let subtitleCount = 0;
-        let hasValidContent = false;
-
-        // Debug info
-        const debugInfo = {
-            totalLines: lines.length,
-            timestampLines: 0,
-            contentLines: 0,
-            emptyLines: 0
-        };
-
-        // Bỏ qua header WEBVTT và các dòng trống đầu tiên
-        while (i < lines.length && (lines[i].startsWith('WEBVTT') || lines[i].trim() === '')) {
-            i++;
-        }
-
-        while (i < lines.length) {
-            const timeMatch = lines[i].match(/(\d{2}:\d{2}:\d{2}\.\d{3}) --> (\d{2}:\d{2}:\d{2}\.\d{3})/);
-            if (timeMatch) {
-                debugInfo.timestampLines++;
-                const startTime = timeMatch[1].replace('.', ',');
-                const endTime = timeMatch[2].replace('.', ',');
-                i++;
-                
-                let subtitleText = '';
-                let hasText = false;
-
-                while (i < lines.length && lines[i].trim() !== '') {
-                    debugInfo.contentLines++;
-                    // Loại bỏ các thẻ HTML/XML và định dạng đặc biệt
-                    let cleanLine = lines[i]
-                        .replace(/<[^>]+>/g, '') // Loại bỏ thẻ HTML
-                        .replace(/align:start/g, '')
-                        .replace(/position:\d+%/g, '')
-                        .replace(/\d{2}:\d{2}:\d{2}\.\d{3}/g, '')
-                        .replace(/<c>/g, '')
-                        .replace(/<\/c>/g, '')
-                        .replace(/&nbsp;/g, ' ')
-                        .replace(/&amp;/g, '&')
-                        .replace(/&lt;/g, '<')
-                        .replace(/&gt;/g, '>')
-                        .replace(/&quot;/g, '"')
-                        .replace(/&#39;/g, "'")
-                        .replace(/\u200B/g, '') // Loại bỏ zero-width space
-                        .replace(/\u200C/g, '') // Loại bỏ zero-width non-joiner
-                        .replace(/\u200D/g, '') // Loại bỏ zero-width joiner
-                        .replace(/\u200E/g, '') // Loại bỏ left-to-right mark
-                        .replace(/\u200F/g, '') // Loại bỏ right-to-left mark
-                        .trim();
-
-                    if (cleanLine) {
-                        subtitleText += (subtitleText ? '\n' : '') + cleanLine;
-                        hasText = true;
-                    }
-                    i++;
-                }
-
-                if (hasText) {
-                    srtText += `${startTime} --> ${endTime}\n${subtitleText.trim()}\n\n`;
-                    subtitleCount++;
-                    hasValidContent = true;
-                }
-            } else {
-                if (lines[i].trim() === '') {
-                    debugInfo.emptyLines++;
-                }
-                i++;
-            }
-        }
-
-        if (!hasValidContent) {
-            logger.error('No valid subtitles found in VTT content', {
-                debugInfo,
-                vttContent: vttText
-            });
-            return null;
-        }
-
-        if (subtitleCount === 0) {
-            logger.error('No valid subtitles after conversion to SRT', {
-                debugInfo,
-                vttContent: vttText
-            });
-            return null;
-        }
-
-        logger.info(`Converted ${subtitleCount} subtitles to SRT format`, { debugInfo });
-        return srtText.trim();
-    } catch (error) {
-        logger.error(`VTT to SRT conversion failed: ${error.message}`, {
-            error: error.stack,
-            vttContent: vttText
-        });
+        logger.error(`Subtitle format conversion failed: ${error.message}`);
         return null;
     }
 }
@@ -573,230 +469,101 @@ function convertVttToSrt(vttText) {
 async function handleDownloadSubtitle(req, res, downloadProgressMap) {
     const { url, platform, targetLanguage, formatPreference } = req.body;
 
-    // Kiểm tra dữ liệu đầu vào
     if (!url || !platform) {
         logger.warn(`Missing required fields (url, platform) from IP: ${req.ip}`);
-        throw new Error('Thiếu thông tin cần thiết (url, platform)');
+        return res.status(400).json({ error: 'Thiếu thông tin cần thiết (url, platform)' });
     }
 
-    // Áp dụng giới hạn tốc độ
-    await subtitleRateLimiter.consume(`download_subtitle_${req.ip}`, 1);
+    try {
+        const downloadId = uuidv4();
+        downloadProgressMap.set(downloadId, { progress: 0, error: null });
 
-    // Xử lý ngôn ngữ và định dạng
-    const defaultLanguage = await getDefaultLanguage(req.ip);
-    const selectedLanguage = targetLanguage || defaultLanguage;
-    const selectedFormat = formatPreference ? formatPreference.toLowerCase() : 'srt';
-
-    // Kiểm tra định dạng hợp lệ
-    if (!['srt', 'vtt', 'txt'].includes(selectedFormat)) {
-        throw new Error('Định dạng không được hỗ trợ. Chỉ hỗ trợ: srt, vtt, txt.');
-    }
-
-    logger.info(`Download subtitle request: ${platform}, URL: ${url}, Language: ${selectedLanguage} (default: ${defaultLanguage}), Format: ${selectedFormat}, IP: ${req.ip}`);
-
-    // Tạo thư mục lưu trữ phụ đề
-    const subtitlesDir = path.join(__dirname, 'subtitles');
-    if (!await fs.access(subtitlesDir).then(() => true).catch(() => false)) {
-        await fs.mkdir(subtitlesDir, { recursive: true });
-    }
-
-    // Dọn dẹp thư mục phụ đề
-    await cleanFolder(subtitlesDir);
-
-    // Tạo ID tải xuống và lưu vào tiến trình
-    const downloadId = uuidv4();
-    downloadProgressMap.set(downloadId, { progress: 0, error: null });
-
-    // Kiểm tra yêu cầu trùng lặp
-    const requestKey = `${url}:${selectedLanguage}:${selectedFormat}`;
-    if (activeSubtitleRequests.has(requestKey)) {
-        logger.warn(`Duplicate subtitle request detected for ${requestKey}, IP: ${req.ip}`);
-        return res.status(429).json({ error: 'Yêu cầu tải phụ đề đang được xử lý. Vui lòng chờ!' });
-    }
-    activeSubtitleRequests.set(requestKey, downloadId);
-
-    // Trả về ngay lập tức với downloadId để client theo dõi tiến trình
-    res.status(200).json({ message: 'Đang tải phụ đề, vui lòng chờ...', downloadId });
-
-    // Tải phụ đề bất đồng bộ
-    (async () => {
-        try {
-            if (platform !== 'youtube') {
-                throw new Error('Hiện tại chỉ hỗ trợ nền tảng YouTube.');
-            }
-
-            // Kiểm tra URL và trích xuất video ID
+        if (platform === 'youtube') {
             const videoId = url.match(/[?&]v=([^&]+)/)?.[1] || url.match(/youtu\.be\/([^?&]+)/)?.[1];
             if (!videoId) {
                 throw new Error('URL YouTube không hợp lệ');
             }
 
-            // Kiểm tra tính khả dụng của video
             const availability = await checkVideoAvailability(videoId);
             if (!availability.isAvailable) {
                 throw new Error(availability.reason);
             }
 
-            // Lấy danh sách ngôn ngữ phụ đề khả dụng
-            const { manual: manualLanguages, auto: autoLanguages } = await getAvailableSubtitleLanguages(url);
-            const allLanguages = [...new Set([...manualLanguages, ...autoLanguages])];
-            
-            if (allLanguages.length === 0) {
-                throw new Error('Video không có phụ đề nào khả dụng.');
+            let videoTitle = await getVideoTitle(videoId);
+            if (!videoTitle || videoTitle.trim() === '') {
+                videoTitle = `Video_YouTube_${videoId}`;
             }
 
-            // Kiểm tra xem ngôn ngữ yêu cầu có khả dụng không
-            if (!allLanguages.includes(selectedLanguage)) {
-                const availableLangs = allLanguages.join(', ');
-                throw new Error(`Không tìm thấy phụ đề cho ngôn ngữ ${selectedLanguage}. Các ngôn ngữ khả dụng: ${availableLangs}`);
+            const language = targetLanguage || await getDefaultLanguage();
+            const format = formatPreference || 'vtt';
+            const sanitizedTitle = sanitizeFileName(videoTitle);
+            const fileName = `${sanitizedTitle}_${language}.${format}`;
+            const filePath = path.join(__dirname, 'subtitles', fileName);
+
+            if (!await fsPromises.access(path.join(__dirname, 'subtitles')).then(() => true).catch(() => false)) {
+                await fsPromises.mkdir(path.join(__dirname, 'subtitles'), { recursive: true });
             }
 
-            // Xác định ngôn ngữ cuối cùng
-            let finalLanguage = selectedLanguage;
-            if (manualLanguages.includes(selectedLanguage)) {
-                finalLanguage = selectedLanguage;
-            } else if (autoLanguages.includes(selectedLanguage)) {
-                finalLanguage = `${selectedLanguage}.auto`;
-            } else {
-                // Thử tìm ngôn ngữ thay thế
-                if (manualLanguages.includes(defaultLanguage)) {
-                    finalLanguage = defaultLanguage;
-                } else if (autoLanguages.includes(defaultLanguage)) {
-                    finalLanguage = `${defaultLanguage}.auto`;
-                } else {
-                    finalLanguage = manualLanguages[0] || `${autoLanguages[0]}.auto`;
-                }
-                logger.info(`Ngôn ngữ ${selectedLanguage} không khả dụng, sử dụng ${finalLanguage} thay thế`);
-            }
+            await cleanFolder(path.join(__dirname, 'subtitles'));
 
-            // Cập nhật tiến trình
-            downloadProgressMap.set(downloadId, { progress: 30, error: null });
+            res.status(200).json({ message: 'Đang tải, vui lòng chờ...', downloadId });
 
-            // Thử tải phụ đề bằng nhiều phương pháp
-            let subtitleContent = null;
-            let downloadMethod = '';
-            let downloadError = null;
-
-            // Phương pháp 1: Sử dụng @distube/ytdl-core
-            try {
-                subtitleContent = await downloadSubtitleWithYtdlCore(videoId, finalLanguage);
-                if (subtitleContent) {
-                    downloadMethod = 'ytdl-core';
-                    logger.info('Successfully downloaded subtitles using ytdl-core');
-                }
-            } catch (error) {
-                downloadError = error;
-                logger.error(`ytdl-core download failed: ${error.message}`);
-            }
-
-            // Phương pháp 2: Thử với yt-dlp nếu phương pháp 1 thất bại
-            if (!subtitleContent) {
+            (async () => {
                 try {
-                    const outputPath = path.join(tempDir, `${videoTitle}.${finalLanguage}.vtt`);
-                    subtitleContent = await downloadSubtitleWithYtDlp(url, finalLanguage, outputPath);
-                    if (subtitleContent) {
-                        downloadMethod = 'yt-dlp';
-                        logger.info('Successfully downloaded subtitles using yt-dlp');
+                    let subtitleContent = null;
+                    let success = false;
+
+                    // Ensure temp directory exists before using it
+                    const tempDir = path.join(__dirname, 'temp');
+                    if (!await fsPromises.access(tempDir).then(() => true).catch(() => false)) {
+                        await fsPromises.mkdir(tempDir, { recursive: true });
                     }
-                } catch (error) {
-                    downloadError = error;
-                    logger.error(`yt-dlp download failed: ${error.message}`);
-                }
-            }
 
-            // Phương pháp 3: Thử với node-youtube-subtitles
-            if (!subtitleContent) {
-                try {
-                    subtitleContent = await downloadSubtitleWithNodeSubtitles(videoId, finalLanguage);
-                    if (subtitleContent) {
-                        downloadMethod = 'node-youtube-subtitles';
-                        logger.info('Successfully downloaded subtitles using node-youtube-subtitles');
+                    // Try yt-dlp first
+                    const tempPath = path.join(tempDir, `${sanitizedTitle}.${language}.vtt`);
+                    success = await downloadSubtitleWithYtDlp(url, language, tempPath);
+                    if (success && await fsPromises.access(tempPath).then(() => true).catch(() => false)) {
+                        subtitleContent = await fsPromises.readFile(tempPath, 'utf8');
+                        await fsPromises.unlink(tempPath);
                     }
-                } catch (error) {
-                    downloadError = error;
-                    logger.error(`node-youtube-subtitles download failed: ${error.message}`);
-                }
-            }
 
-            // Phương pháp 4: Thử với YouTube API
-            if (!subtitleContent) {
-                try {
-                    subtitleContent = await downloadSubtitleWithYouTubeAPI(videoId, finalLanguage);
-                    if (subtitleContent) {
-                        downloadMethod = 'youtube-api';
-                        logger.info('Successfully downloaded subtitles using YouTube API');
+                    // If yt-dlp fails, try ytdl-core
+                    if (!subtitleContent) {
+                        subtitleContent = await downloadSubtitleWithYtdlCore(videoId, language);
                     }
+
+                    // If both fail, try node-subtitles
+                    if (!subtitleContent) {
+                        subtitleContent = await downloadSubtitleWithNodeSubtitles(videoId, language);
+                    }
+
+                    if (!subtitleContent) {
+                        throw new Error('Không thể tải phụ đề từ bất kỳ nguồn nào');
+                    }
+
+                    const convertedContent = convertSubtitleFormat(subtitleContent, format);
+                    if (!convertedContent) {
+                        throw new Error('Không thể chuyển đổi định dạng phụ đề');
+                    }
+
+                    await fsPromises.writeFile(filePath, convertedContent);
+                    downloadProgressMap.set(downloadId, { 
+                        progress: 100, 
+                        downloadUrl: `/subtitles/${encodeURIComponent(fileName)}`, 
+                        error: null 
+                    });
                 } catch (error) {
-                    downloadError = error;
-                    logger.error(`YouTube API download failed: ${error.message}`);
+                    logger.error(`Subtitle download error: ${error.message}`);
+                    downloadProgressMap.set(downloadId, { progress: 0, error: error.message });
                 }
-            }
-
-            // Kiểm tra nội dung phụ đề
-            if (!subtitleContent || subtitleContent.trim() === '') {
-                const errorMessage = downloadError ? 
-                    `Không thể tải phụ đề cho ngôn ngữ ${selectedLanguage}. Lỗi: ${downloadError.message}` :
-                    `Không thể tải phụ đề cho ngôn ngữ ${selectedLanguage}. Vui lòng thử ngôn ngữ khác.`;
-                throw new Error(errorMessage);
-            }
-
-            // Cập nhật tiến trình
-            downloadProgressMap.set(downloadId, { progress: 70, error: null });
-
-            // Chuyển đổi định dạng
-            const convertedContent = convertSubtitleFormat(subtitleContent, selectedFormat);
-            if (!convertedContent) {
-                throw new Error(`Không thể chuyển đổi phụ đề sang định dạng ${selectedFormat}. Vui lòng thử định dạng khác.`);
-            }
-
-            // Tạo tên file và lưu phụ đề
-            const fileName = `${sanitizeFileName(videoTitle)}_${finalLanguage}.${selectedFormat}`;
-            const filePath = path.join(subtitlesDir, fileName);
-            
-            try {
-                await fs.writeFile(filePath, convertedContent, 'utf8');
-                logger.info(`Successfully wrote subtitle file: ${filePath}`);
-
-                // Kiểm tra file sau khi ghi
-                const stats = await fs.stat(filePath);
-                if (stats.size === 0) {
-                    throw new Error('File phụ đề rỗng sau khi tạo.');
-                }
-
-                // Cập nhật tiến trình hoàn thành
-                downloadProgressMap.set(downloadId, { 
-                    progress: 100, 
-                    downloadUrl: `/subtitles/${encodeURIComponent(fileName)}`, 
-                    selectedLanguage: finalLanguage,
-                    defaultLanguage: defaultLanguage,
-                    availableLanguages: {
-                        manual: manualLanguages,
-                        auto: autoLanguages
-                    },
-                    error: null 
-                });
-            } catch (writeError) {
-                logger.error(`Error writing subtitle file: ${writeError.message}`);
-                throw new Error('Không thể lưu file phụ đề. Vui lòng thử lại!');
-            }
-
-        } catch (error) {
-            logger.error(`Subtitle Download Error: ${error.message}`);
-            let errorMessage;
-            if (error.code === 'RATE_LIMITER_POINTS_EXCEEDED') {
-                errorMessage = 'Quá nhiều yêu cầu. Vui lòng thử lại sau vài giây!';
-            } else if (error.response) {
-                errorMessage = error.response.data?.error?.message || error.message || 'Lỗi từ API tải phụ đề';
-            } else if (error.code === 'ECONNABORTED') {
-                errorMessage = 'Yêu cầu tải phụ đề hết thời gian. Vui lòng kiểm tra kết nối và thử lại!';
-            } else {
-                errorMessage = error.message || 'Lỗi server khi tải phụ đề. Vui lòng thử lại sau!';
-            }
-            downloadProgressMap.set(downloadId, { progress: 0, error: errorMessage });
-        } finally {
-            activeSubtitleRequests.delete(requestKey);
+            })();
+        } else {
+            throw new Error('Nền tảng không được hỗ trợ');
         }
-    })();
+    } catch (error) {
+        logger.error(`Subtitle Download Error: ${error.message}`);
+        return res.status(500).json({ error: error.message || 'Lỗi server khi tải phụ đề.' });
+    }
 }
 
 // Hàm tải tất cả phụ đề
@@ -827,8 +594,8 @@ async function downloadAllSubtitles(url, downloadProgressMap) {
         // Tạo thư mục tạm và thư mục phụ đề
         const tempDir = path.join(__dirname, 'temp');
         const subtitlesDir = path.join(__dirname, 'subtitles');
-        await fs.mkdir(tempDir, { recursive: true });
-        await fs.mkdir(subtitlesDir, { recursive: true });
+        await fsPromises.mkdir(tempDir, { recursive: true });
+        await fsPromises.mkdir(subtitlesDir, { recursive: true });
         await cleanFolder(subtitlesDir);
 
         // Lấy tiêu đề video
@@ -877,7 +644,7 @@ async function downloadAllSubtitles(url, downloadProgressMap) {
                         if (content && content.trim() !== '') {
                             const fileName = `${sanitizeFileName(videoTitle)}_${selectedLang}.${format}`;
                             const filePath = path.join(subtitlesDir, fileName);
-                            await fs.writeFile(filePath, content, 'utf8');
+                            await fsPromises.writeFile(filePath, content, 'utf8');
                             subtitleFiles.push({
                                 language: selectedLang,
                                 format,
@@ -902,7 +669,7 @@ async function downloadAllSubtitles(url, downloadProgressMap) {
 
         // Xóa thư mục tạm
         try {
-            await fs.rm(tempDir, { recursive: true, force: true });
+            await fsPromises.rm(tempDir, { recursive: true, force: true });
         } catch (cleanupError) {
             logger.error(`Error cleaning up temp directory: ${cleanupError.message}`);
         }
@@ -1030,97 +797,70 @@ async function downloadSubtitleWithRetry(url, language, isAuto = false, retries 
     }
 }
 
-// Hàm chuyển đổi phụ đề sang VTT (chỉ giữ thời gian và văn bản)
-function arrayToVtt(subtitles) {
-    if (!subtitles || subtitles.length === 0) return null;
-    let vtt = '';
-    subtitles.forEach((sub) => {
-        const start = sub.startMs ? msToTime(sub.startMs) : msToTime(sub.start * 1000);
-        const end = sub.startMs ? msToTime(sub.startMs + sub.durationMs) : msToTime(sub.end * 1000);
-        const text = sub.subtitle || sub.text;
-        if (text && text.trim()) {
-            const truncatedText = truncateSubtitleText(text);
-            vtt += `${start} --> ${end}\n${truncatedText}\n\n`;
+// Hàm chuyển đổi phụ đề XML sang VTT
+function convertXmlToVtt(xmlContent) {
+    try {
+        if (!xmlContent || xmlContent.trim() === '') {
+            logger.error('Empty XML content for conversion');
+            return null;
         }
-    });
-    return vtt.trim() === '' ? null : vtt.trim();
-}
 
-// Hàm chuyển đổi phụ đề sang SRT (chỉ giữ thời gian và văn bản)
-function arrayToSrt(subtitles) {
-    if (!subtitles || subtitles.length === 0) return null;
-    let srt = '';
-    subtitles.forEach((sub) => {
-        const start = sub.startMs ? msToTimeSrt(sub.startMs) : msToTimeSrt(sub.start * 1000);
-        const end = sub.startMs ? msToTimeSrt(sub.startMs + sub.durationMs) : msToTimeSrt(sub.end * 1000);
-        const text = sub.subtitle || sub.text;
-        if (text && text.trim()) {
-            const truncatedText = truncateSubtitleText(text);
-            srt += `${start} --> ${end}\n${truncatedText}\n\n`;
+        // Parse XML content using jsdom
+        const dom = new JSDOM(xmlContent, { contentType: 'text/xml' });
+        const xmlDoc = dom.window.document;
+        const textElements = xmlDoc.getElementsByTagName('text');
+
+        if (!textElements || textElements.length === 0) {
+            logger.error('No text elements found in XML');
+            return null;
         }
-    });
-    return srt.trim() === '' ? null : srt.trim();
-}
 
-// Hàm chuyển đổi phụ đề sang XML (chỉ giữ thời gian và văn bản)
-function arrayToXml(subtitles) {
-    if (!subtitles || subtitles.length === 0) return null;
-    let xml = '';
-    subtitles.forEach((sub) => {
-        const start = sub.startMs ? msToTime(sub.startMs) : msToTime(sub.start * 1000);
-        const end = sub.startMs ? msToTime(sub.startMs + sub.durationMs) : msToTime(sub.end * 1000);
-        const text = sub.subtitle || sub.text;
-        if (text && text.trim()) {
-            const truncatedText = truncateSubtitleText(text);
-            xml += `${start} --> ${end}\n${truncatedText}\n\n`;
+        // Convert to VTT format
+        let vttContent = 'WEBVTT\n\n';
+        for (let i = 0; i < textElements.length; i++) {
+            const text = textElements[i];
+            const start = text.getAttribute('start');
+            const dur = text.getAttribute('dur');
+            
+            if (!start || !dur) {
+                continue;
+            }
+
+            const startTime = msToTime(parseFloat(start) * 1000);
+            const endTime = msToTime((parseFloat(start) + parseFloat(dur)) * 1000);
+            const content = text.textContent.trim();
+
+            if (content) {
+                vttContent += `${startTime} --> ${endTime}\n${content}\n\n`;
+            }
         }
-    });
-    return xml.trim() === '' ? null : xml.trim();
-}
 
-// Hàm chuyển đổi phụ đề sang TXT (chỉ văn bản)
-function arrayToTxt(subtitles) {
-    if (!subtitles || subtitles.length === 0) return null;
-    const text = subtitles
-        .filter(sub => (sub.subtitle || sub.text) && (sub.subtitle || sub.text).trim())
-        .map(sub => truncateSubtitleText(sub.subtitle || sub.text))
-        .join('\n\n');
-    return text.trim() === '' ? null : text.trim();
-}
-
-// Hàm cắt ngắn văn bản phụ đề
-function truncateSubtitleText(text, maxLength = 40) {
-    if (!text) return '';
-    
-    // Loại bỏ các thẻ HTML/XML và định dạng đặc biệt
-    let cleanText = text
-        .replace(/<[^>]+>/g, '') // Loại bỏ thẻ HTML
-        .replace(/align:start/g, '')
-        .replace(/position:\d+%/g, '')
-        .replace(/<c>/g, '')
-        .replace(/<\/c>/g, '')
-        .replace(/&nbsp;/g, ' ')
-        .replace(/&amp;/g, '&')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&quot;/g, '"')
-        .replace(/&#39;/g, "'")
-        .replace(/\u200B/g, '') // Loại bỏ zero-width space
-        .replace(/\u200C/g, '') // Loại bỏ zero-width non-joiner
-        .replace(/\u200D/g, '') // Loại bỏ zero-width joiner
-        .replace(/\u200E/g, '') // Loại bỏ left-to-right mark
-        .replace(/\u200F/g, '') // Loại bỏ right-to-left mark
-        .trim();
-
-    // Nếu văn bản dài hơn maxLength, cắt ngắn và thêm dấu ...
-    if (cleanText.length > maxLength) {
-        cleanText = cleanText.substring(0, maxLength) + '...';
+        return vttContent.trim() === 'WEBVTT' ? null : vttContent.trim();
+    } catch (error) {
+        logger.error(`Error converting XML to VTT: ${error.message}`);
+        return null;
     }
+}
 
-    return cleanText;
+// Hàm chuyển đổi thời gian từ milliseconds sang định dạng VTT
+function msToTime(ms) {
+    const totalSeconds = Math.floor(ms / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const milliseconds = Math.floor((ms % 1000));
+    return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}.${pad(milliseconds, 3)}`;
+}
+
+// Hàm bổ sung số 0 cho định dạng thời gian
+function pad(num, size = 2) {
+    return num.toString().padStart(size, '0');
 }
 
 module.exports = {
     handleDownloadSubtitle,
-    downloadAllSubtitles
+    downloadAllSubtitles,
+    convertXmlToVtt,
+    msToTime,
+    pad
 };

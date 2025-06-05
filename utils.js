@@ -4,7 +4,7 @@ const path = require('path');
 const winston = require('winston');
 const ffmpeg = require('fluent-ffmpeg');
 const ytdl = require('@distube/ytdl-core');
-const ytDlp = require('yt-dlp');
+const ytDlp = require('yt-dlp-exec');
 
 // Khởi tạo logger với winston
 const logger = winston.createLogger({
