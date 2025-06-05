@@ -14,10 +14,10 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies with better error handling
+# Install dependencies
 RUN npm config set registry https://registry.npmjs.org/ && \
     npm cache clean --force && \
-    npm install --verbose --no-audit --no-fund --no-optional --prefer-offline --no-package-lock --legacy-peer-deps
+    npm ci --no-audit --no-fund
 
 # Copy app source
 COPY . .
